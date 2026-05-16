@@ -1,0 +1,39 @@
+{
+  "name": "@tifan/pi-inline-skills",
+  "version": "0.0.0",
+  "description": "Inline $skill autocomplete in the pi editor.",
+  "keywords": [
+    "autocomplete",
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "skills"
+  ],
+  "homepage": "https://github.com/tifandotme/pi-extensions/tree/master/packages/pi-inline-skills#readme",
+  "bugs": "https://github.com/tifandotme/pi-extensions/issues",
+  "license": "MIT",
+  "author": "Tifan Avianto <tifan@hadl.ai>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tifandotme/pi-extensions.git",
+    "directory": "packages/pi-inline-skills"
+  },
+  "files": [
+    "*.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": [
+      "./inline-skills.ts"
+    ]
+  }
+}
