@@ -99,7 +99,7 @@ function getSkills(pi: ExtensionAPI): SkillInfo[] {
     )
     .map((command) => ({
       name: command.name.slice("skill:".length),
-      ...(command.description ? { description: command.description } : {}),
+      description: command.description || undefined,
     }))
 }
 
@@ -265,7 +265,7 @@ function createDollarSkillAutocompleteProvider(
           (skill): AutocompleteItem => ({
             value: `$${skill.name}`,
             label: skill.name,
-            ...(skill.description ? { description: skill.description } : {}),
+            description: skill.description || undefined,
           }),
         ),
       }
