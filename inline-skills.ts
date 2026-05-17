@@ -97,10 +97,11 @@ function getSkills(pi: ExtensionAPI): SkillInfo[] {
       (command) =>
         command.source === "skill" && command.name.startsWith("skill:"),
     )
-    .map((command) => ({
-      name: command.name.slice("skill:".length),
-      description: command.description || undefined,
-    }))
+    .map((command) => {
+      const skill: SkillInfo = { name: command.name.slice("skill:".length) }
+      if (command.description) skill.description = command.description
+      return skill
+    })
 }
 
 function normalizePath(path: string, cwd: string): string {
@@ -261,13 +262,14 @@ function createDollarSkillAutocompleteProvider(
 
       return {
         prefix: `$${query}`,
-        items: matches.map(
-          (skill): AutocompleteItem => ({
+        items: matches.map((skill): AutocompleteItem => {
+          const item: AutocompleteItem = {
             value: `$${skill.name}`,
             label: skill.name,
-            description: skill.description || undefined,
-          }),
-        ),
+          }
+          if (skill.description) item.description = skill.description
+          return item
+        }),
       }
     },
 
