@@ -247,14 +247,13 @@ function installSlashAutocompleteTrigger(): void {
     this: unknown,
     data: string,
   ): void {
-    originalHandleInput.call(this, data)
-
     const editor = this as {
       isShowingAutocomplete?: () => boolean
-      getText?: () => string
       state?: { cursorLine: number; cursorCol: number; lines: string[] }
       tryTriggerAutocomplete?: () => void
     }
+
+    originalHandleInput.call(this, data)
     if (
       editor.isShowingAutocomplete?.() ||
       !editor.state ||
@@ -304,7 +303,7 @@ function createSlashSkillAutocompleteProvider(
       }
 
       return {
-        prefix: `/${query}`,
+        prefix: query,
         items: matches.map((skill): AutocompleteItem => {
           const item: AutocompleteItem = {
             value: `/${skill.name}`,
@@ -318,7 +317,14 @@ function createSlashSkillAutocompleteProvider(
     },
 
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-      if (!prefix.startsWith("/") || !item.value.startsWith("/")) {
+      const currentLine = lines[cursorLine] ?? ""
+      const slashPrefixStart = cursorCol - prefix.length - 1
+      const isSlashSkillCompletion =
+        item.value.startsWith("/") &&
+        slashPrefixStart >= 0 &&
+        currentLine[slashPrefixStart] === "/"
+
+      if (!isSlashSkillCompletion) {
         return current.applyCompletion(
           lines,
           cursorLine,
@@ -328,8 +334,7 @@ function createSlashSkillAutocompleteProvider(
         )
       }
 
-      const currentLine = lines[cursorLine] ?? ""
-      const beforePrefix = currentLine.slice(0, cursorCol - prefix.length)
+      const beforePrefix = currentLine.slice(0, slashPrefixStart)
       const afterCursor = currentLine.slice(cursorCol)
       const suffix = afterCursor.startsWith(" ") ? "" : " "
       const nextLines = [...lines]
