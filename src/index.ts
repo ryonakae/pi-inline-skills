@@ -44,12 +44,15 @@ type SkillCommand = {
   source: string
   sourceInfo: {
     path: string
+    source: string
+    scope: "user" | "project" | "temporary"
   }
 }
 
 type SkillInfo = {
   name: string
   description?: string
+  sourceInfo?: SkillCommand["sourceInfo"]
 }
 
 type LoadedSkillEntryData = {
@@ -92,6 +95,33 @@ function filterSkills(skills: SkillInfo[], query: string): SkillInfo[] {
     .map((entry) => entry.skill)
 }
 
+function getAutocompleteSourceTag(
+  sourceInfo: SkillCommand["sourceInfo"] | undefined,
+): string | undefined {
+  if (!sourceInfo) return undefined
+
+  const scopePrefix =
+    sourceInfo.scope === "user"
+      ? "u"
+      : sourceInfo.scope === "project"
+        ? "p"
+        : "t"
+  const source = sourceInfo.source.trim()
+  if (source === "auto" || source === "local" || source === "cli") {
+    return scopePrefix
+  }
+  if (source.startsWith("npm:")) return `${scopePrefix}:${source}`
+  return scopePrefix
+}
+
+function prefixAutocompleteDescription(skill: SkillInfo): string | undefined {
+  const sourceTag = getAutocompleteSourceTag(skill.sourceInfo)
+  if (!sourceTag) return skill.description
+  return skill.description
+    ? `[${sourceTag}] ${skill.description}`
+    : `[${sourceTag}]`
+}
+
 function getSkills(pi: ExtensionAPI): SkillInfo[] {
   return (pi.getCommands() as SkillCommand[])
     .filter(
@@ -99,7 +129,10 @@ function getSkills(pi: ExtensionAPI): SkillInfo[] {
         command.source === "skill" && command.name.startsWith("skill:"),
     )
     .map((command) => {
-      const skill: SkillInfo = { name: command.name.slice("skill:".length) }
+      const skill: SkillInfo = {
+        name: command.name.slice("skill:".length),
+        sourceInfo: command.sourceInfo,
+      }
       if (command.description) skill.description = command.description
       return skill
     })
@@ -275,9 +308,10 @@ function createSlashSkillAutocompleteProvider(
         items: matches.map((skill): AutocompleteItem => {
           const item: AutocompleteItem = {
             value: `/${skill.name}`,
-            label: skill.name,
+            label: `skill:${skill.name}`,
           }
-          if (skill.description) item.description = skill.description
+          const description = prefixAutocompleteDescription(skill)
+          if (description) item.description = description
           return item
         }),
       }
