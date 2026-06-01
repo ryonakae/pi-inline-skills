@@ -1,13 +1,10 @@
 # @tifan/pi-inline-skills
 
-Inline `/skill` autocomplete in the pi editor.
+Load multiple skills from inside your prompt.
 
-Type `/` followed by a skill name fragment to open a fuzzy-matched picker of available skills. On submit, each `/name` token is replaced with the skill name and an instruction to load it is appended to the system prompt for that turn. Skills read during the session are tracked so they are not reloaded.
+`pi-inline-skills` adds `/skill` autocomplete to the pi editor. Type `/` with part of a skill name, choose one or more matches, and keep writing. When you submit, the extension tells pi to load those skills for that turn.
 
-[add image: inline skill autocomplete]
-
-- The `/` autocomplete picker filtered to a few skills.
-- The submitted prompt after skill tokens are rewritten.
+![Inline skill autocomplete picker](https://raw.githubusercontent.com/tifandotme/pi-extensions/refs/heads/master/packages/pi-inline-skills/assets/skills-selector-triggered-inline.webp)
 
 ## Install
 
@@ -15,19 +12,31 @@ Type `/` followed by a skill name fragment to open a fuzzy-matched picker of ava
 pi install npm:@tifan/pi-inline-skills
 ```
 
+## How it works
+
+- Type `/` followed by part of a skill name to open the picker.
+- Choose one or more skills while writing your prompt.
+- On submit, each `/name` token is replaced with the skill name, and one instruction to load the matching skills is added behind the scenes.
+- Skills read during the session are tracked, so they are not loaded again.
+- If the prompt starts with a registered pi command, that command wins. Otherwise, a starting token like `/tdd` is treated as an inline skill.
+
 ## Commands
 
 - `/loaded-skills`: List skills loaded in the current session.
 
 ## Example
 
-Typing `/tdd fix this` or `let's /tdd this and /review when done` submits with the message rewritten and a single instruction added behind the scenes to load the matching skills.
+Typing this:
 
-If the prompt starts with a registered pi command, that command wins. Otherwise, a starting token like `/tdd` is treated as an inline skill.
+```text
+let's /tdd this and /review when done
+```
 
-[add image: loaded skills command]
+submits the prompt with `tdd` and `review` selected as skills to load. The visible message stays readable, and the load instruction is handled outside your prompt text.
 
-- The `/loaded-skills` output.
+![Loaded skills command output](https://raw.githubusercontent.com/tifandotme/pi-extensions/refs/heads/master/packages/pi-inline-skills/assets/loaded-skills-output.webp)
+
+Use `/loaded-skills` to see which skills have already been read in the current session.
 
 ## Release notes
 
