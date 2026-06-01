@@ -58,8 +58,9 @@ type LoadedSkillEntryData = {
 
 const LOADED_SKILL_ENTRY_TYPE = "loaded-skill"
 const MAX_SUGGESTIONS = 30
-const SKILL_TOKEN_RE = /(^|[\s([{,])\$([a-z0-9][a-z0-9-]{0,63})/gi
-const DOLLAR_SKILL_CONTEXT_RE = /(?:^|[\s([{,])\$[a-z0-9-]*$/i
+const SKILL_TOKEN_RE =
+  /(^|[\s([{,])\/([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-]|[:/])/gi
+const SLASH_SKILL_CONTEXT_RE = /(?:^|[\s([{,])\/[a-z0-9-]*$/i
 
 function fuzzyScore(value: string, query: string): number {
   const target = value.toLowerCase()
@@ -102,6 +103,17 @@ function getSkills(pi: ExtensionAPI): SkillInfo[] {
       if (command.description) skill.description = command.description
       return skill
     })
+}
+
+function hasStartingCommandConflict(pi: ExtensionAPI, text: string): boolean {
+  const match = text.match(/^\/([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-]|[:/])/i)
+  if (!match?.[1]) return false
+
+  const name = match[1].toLowerCase()
+  return (pi.getCommands() as SkillCommand[]).some(
+    (command) =>
+      command.source !== "skill" && command.name.toLowerCase() === name,
+  )
 }
 
 function normalizePath(path: string, cwd: string): string {
@@ -185,19 +197,17 @@ function expandInlineSkills(
   return { text: rewritten || text, instruction }
 }
 
-function extractDollarSkillPrefix(
-  textBeforeCursor: string,
-): string | undefined {
-  const match = textBeforeCursor.match(/(?:^|[\s([{,])\$([a-z0-9-]*)$/i)
+function extractSlashSkillPrefix(textBeforeCursor: string): string | undefined {
+  const match = textBeforeCursor.match(/(?:^|[\s([{,])\/([a-z0-9-]*)$/i)
   return match?.[1]
 }
 
-function installDollarAutocompleteTrigger(): void {
+function installSlashAutocompleteTrigger(): void {
   const proto = CustomEditor.prototype as unknown as {
     handleInput(data: string): void
-    inlineSkillsDollarTriggerInstalled?: boolean
+    inlineSkillsSlashTriggerInstalled?: boolean
   }
-  if (proto.inlineSkillsDollarTriggerInstalled) return
+  if (proto.inlineSkillsSlashTriggerInstalled) return
 
   const originalHandleInput = proto.handleInput
   proto.handleInput = function patchedHandleInput(
@@ -218,18 +228,18 @@ function installDollarAutocompleteTrigger(): void {
       typeof editor.tryTriggerAutocomplete !== "function"
     )
       return
-    if (!/^[a-zA-Z0-9\-_$]$/.test(data)) return
+    if (!/^[a-zA-Z0-9\-_/]$/.test(data)) return
 
     const currentLine = editor.state.lines[editor.state.cursorLine] ?? ""
     const textBeforeCursor = currentLine.slice(0, editor.state.cursorCol)
-    if (DOLLAR_SKILL_CONTEXT_RE.test(textBeforeCursor)) {
+    if (SLASH_SKILL_CONTEXT_RE.test(textBeforeCursor)) {
       editor.tryTriggerAutocomplete()
     }
   }
-  proto.inlineSkillsDollarTriggerInstalled = true
+  proto.inlineSkillsSlashTriggerInstalled = true
 }
 
-function createDollarSkillAutocompleteProvider(
+function createSlashSkillAutocompleteProvider(
   pi: ExtensionAPI,
   current: AutocompleteProvider,
 ): AutocompleteProvider {
@@ -242,8 +252,8 @@ function createDollarSkillAutocompleteProvider(
     ): Promise<AutocompleteSuggestions | null> {
       const currentLine = lines[cursorLine] ?? ""
       const textBeforeCursor = currentLine.slice(0, cursorCol)
-      const query = extractDollarSkillPrefix(textBeforeCursor)
-      if (query === undefined) {
+      const query = extractSlashSkillPrefix(textBeforeCursor)
+      if (query === undefined || (query === "" && textBeforeCursor === "/")) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options)
       }
 
@@ -261,10 +271,10 @@ function createDollarSkillAutocompleteProvider(
       }
 
       return {
-        prefix: `$${query}`,
+        prefix: `/${query}`,
         items: matches.map((skill): AutocompleteItem => {
           const item: AutocompleteItem = {
-            value: `$${skill.name}`,
+            value: `/${skill.name}`,
             label: skill.name,
           }
           if (skill.description) item.description = skill.description
@@ -274,7 +284,7 @@ function createDollarSkillAutocompleteProvider(
     },
 
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-      if (!prefix.startsWith("$")) {
+      if (!prefix.startsWith("/") || !item.value.startsWith("/")) {
         return current.applyCompletion(
           lines,
           cursorLine,
@@ -311,7 +321,7 @@ export default function (pi: ExtensionAPI): void {
   let pendingSkillLoadInstruction: string | undefined
   let loadedSkills = new Set<string>()
 
-  installDollarAutocompleteTrigger()
+  installSlashAutocompleteTrigger()
 
   pi.registerCommand("loaded-skills", {
     description: "List skills loaded in this session",
@@ -328,7 +338,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     loadedSkills = restoreLoadedSkills(ctx)
     ctx.ui.addAutocompleteProvider((current) =>
-      createDollarSkillAutocompleteProvider(pi, current),
+      createSlashSkillAutocompleteProvider(pi, current),
     )
   })
 
@@ -352,7 +362,10 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("input", async (event, ctx) => {
     pendingSkillLoadInstruction = undefined
-    if (event.source === "extension" || !event.text.includes("$")) {
+    if (event.source === "extension" || !event.text.includes("/")) {
+      return { action: "continue" }
+    }
+    if (hasStartingCommandConflict(pi, event.text)) {
       return { action: "continue" }
     }
 
