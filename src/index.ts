@@ -235,6 +235,47 @@ function extractSlashSkillPrefix(textBeforeCursor: string): string | undefined {
   return match?.[1]
 }
 
+function isPromptStartSlashToken(
+  lines: string[],
+  cursorLine: number,
+  textBeforeCursor: string,
+  prefix: string,
+): boolean {
+  const slashPrefixStart = textBeforeCursor.length - prefix.length - 1
+  if (slashPrefixStart < 0) return false
+  const earlierLinesAreBlank = lines
+    .slice(0, cursorLine)
+    .every((line) => line.trim().length === 0)
+  return (
+    earlierLinesAreBlank &&
+    textBeforeCursor.slice(0, slashPrefixStart).trim() === ""
+  )
+}
+
+function mergeAutocompleteItems(options: {
+  current: AutocompleteSuggestions | null
+  skillItems: AutocompleteItem[]
+  preferCommands: boolean
+  prefix: string
+}): AutocompleteSuggestions {
+  const currentItems = options.current?.items ?? []
+  const orderedItems = options.preferCommands
+    ? [...currentItems, ...options.skillItems]
+    : [...options.skillItems, ...currentItems]
+  const seen = new Set<string>()
+  const items = orderedItems.filter((item) => {
+    const key = `${item.label}\u0000${item.value}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+
+  return {
+    prefix: options.prefix,
+    items: items.slice(0, MAX_SUGGESTIONS),
+  }
+}
+
 function installSlashAutocompleteTrigger(): void {
   const proto = CustomEditor.prototype as unknown as {
     handleInput(data: string): void
@@ -289,37 +330,51 @@ function createSlashSkillAutocompleteProvider(
         return current.getSuggestions(lines, cursorLine, cursorCol, options)
       }
 
+      const currentSuggestions = await current.getSuggestions(
+        lines,
+        cursorLine,
+        cursorCol,
+        options,
+      )
       const skills = getSkills(pi)
       if (options.signal.aborted || skills.length === 0) {
-        return current.getSuggestions(lines, cursorLine, cursorCol, options)
+        return currentSuggestions
       }
 
       const matches = query
         ? filterSkills(skills, query).slice(0, MAX_SUGGESTIONS)
         : skills.slice(0, MAX_SUGGESTIONS)
 
-      if (matches.length === 0) {
-        return current.getSuggestions(lines, cursorLine, cursorCol, options)
-      }
+      if (matches.length === 0) return currentSuggestions
 
-      return {
+      const skillItems = matches.map((skill): AutocompleteItem => {
+        const item: AutocompleteItem = {
+          value: `/${skill.name}`,
+          label: `skill:${skill.name}`,
+        }
+        const description = prefixAutocompleteDescription(skill)
+        if (description) item.description = description
+        return item
+      })
+
+      return mergeAutocompleteItems({
+        current: currentSuggestions,
+        skillItems,
+        preferCommands: isPromptStartSlashToken(
+          lines,
+          cursorLine,
+          textBeforeCursor,
+          query,
+        ),
         prefix: query,
-        items: matches.map((skill): AutocompleteItem => {
-          const item: AutocompleteItem = {
-            value: `/${skill.name}`,
-            label: `skill:${skill.name}`,
-          }
-          const description = prefixAutocompleteDescription(skill)
-          if (description) item.description = description
-          return item
-        }),
-      }
+      })
     },
 
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
       const currentLine = lines[cursorLine] ?? ""
       const slashPrefixStart = cursorCol - prefix.length - 1
       const isSlashSkillCompletion =
+        item.label.startsWith("skill:") &&
         item.value.startsWith("/") &&
         slashPrefixStart >= 0 &&
         currentLine[slashPrefixStart] === "/"
