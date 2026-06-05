@@ -420,7 +420,15 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("loaded-skills", {
     description: "List skills loaded in this session",
     handler: async (_args, ctx) => {
-      const names = [...restoreLoadedSkills(ctx)]
+      const promptOptions = ctx.getSystemPromptOptions()
+      const promptSkillNames = (promptOptions.skills ?? []).map(
+        (skill) => skill.name,
+      )
+      const restoredSkillNames = [...restoreLoadedSkills(ctx)]
+      const names = [...new Set([...promptSkillNames, ...restoredSkillNames])]
+        .filter(Boolean)
+        .toSorted((a, b) => a.localeCompare(b))
+
       if (names.length === 0) {
         ctx.ui.notify("No skills loaded yet", "info")
         return
