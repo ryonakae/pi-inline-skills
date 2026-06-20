@@ -2,7 +2,7 @@
 
 Load multiple skills from inside your prompt.
 
-`pi-inline-skills` adds `/skill` autocomplete to the pi editor. Type `/` with part of a skill name, choose one or more matches, and keep writing. When you submit, the extension tells pi to load those skills for that turn.
+`pi-inline-skills` adds `/skill` autocomplete to the pi editor. Type `/` with part of a skill name, choose one or more matches, and keep writing. When you submit, the extension loads those skills for that turn.
 
 ![Inline skill autocomplete picker](https://raw.githubusercontent.com/tifandotme/pi-extensions/refs/heads/master/packages/pi-inline-skills/assets/skills-selector-triggered-inline.webp)
 
@@ -16,8 +16,9 @@ pi install npm:@tifan/pi-inline-skills
 
 - Type `/` followed by part of a skill name to open the picker.
 - Choose one or more skills while writing your prompt.
-- On submit, each `/name` token is replaced with the skill name, and one instruction to load the matching skills is added behind the scenes.
-- Skills read during the session are tracked, so they are not loaded again.
+- On submit, each `/name` token is replaced with the skill name, and matching skill content is added behind the scenes.
+- Skills loaded during the session are tracked, so they are not injected again.
+- Skills with `disable-model-invocation: true` work because inline loading uses the skill file directly instead of relying on the model-visible skills list.
 - If the prompt starts with a registered pi command, that command wins. Otherwise, a starting token like `/tdd` is treated as an inline skill.
 
 ## Commands

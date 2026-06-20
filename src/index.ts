@@ -1,10 +1,13 @@
-import { existsSync, realpathSync } from "node:fs"
-import { resolve } from "node:path"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { dirname, resolve } from "node:path"
 import {
   CustomEditor,
   type ExtensionAPI,
   type ExtensionContext,
+  SkillInvocationMessageComponent,
+  type ParsedSkillBlock,
 } from "@earendil-works/pi-coding-agent"
+import { Box, Container, Text } from "@earendil-works/pi-tui"
 
 type AutocompleteItem = {
   value: string
@@ -59,7 +62,13 @@ type LoadedSkillEntryData = {
   name?: string
 }
 
+type InlineSkillMessageDetails = {
+  names?: string[]
+  skills?: ParsedSkillBlock[]
+}
+
 const LOADED_SKILL_ENTRY_TYPE = "loaded-skill"
+const INLINE_SKILL_MESSAGE_TYPE = "inline-skill"
 const MAX_SUGGESTIONS = 30
 const SKILL_TOKEN_RE =
   /(^|[\s([{,])\/([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-]|[:/])/gi
@@ -195,15 +204,64 @@ function restoreLoadedSkills(ctx: ExtensionContext): Set<string> {
   return loadedSkills
 }
 
-function buildSkillLoadInstruction(skills: SkillInfo[]): string {
-  const names = skills.map((skill) => skill.name).join(", ")
-  return `Load ${names} ${skills.length === 1 ? "skill" : "skills"}.`
+function stripFrontmatter(content: string): string {
+  if (!content.startsWith("---")) return content
+
+  const end = content.indexOf("\n---", 3)
+  if (end === -1) return content
+
+  const afterEnd = content.indexOf("\n", end + 4)
+  return afterEnd === -1 ? "" : content.slice(afterEnd + 1)
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+}
+
+function buildSkillBlock(
+  skill: SkillInfo,
+  cwd: string,
+): { text: string; skillBlock: ParsedSkillBlock } {
+  const skillPath = skill.sourceInfo?.path
+  if (!skillPath) {
+    throw new Error(`missing path for skill ${skill.name}`)
+  }
+
+  const normalizedPath = normalizePath(skillPath, cwd)
+  const content = readFileSync(normalizedPath, "utf-8")
+  const body = stripFrontmatter(content).trim()
+  const skillContent = `References are relative to ${dirname(normalizedPath)}.\n\n${body}`
+  return {
+    text: `<skill name="${escapeXmlAttribute(skill.name)}" location="${escapeXmlAttribute(normalizedPath)}">\n${skillContent}\n</skill>`,
+    skillBlock: {
+      name: skill.name,
+      location: normalizedPath,
+      content: skillContent,
+      userMessage: undefined,
+    },
+  }
+}
+
+function buildInlineSkillContent(
+  skills: SkillInfo[],
+  cwd: string,
+): { content: string; skillBlocks: ParsedSkillBlock[] } {
+  const skillBlocks = skills.map((skill) => buildSkillBlock(skill, cwd))
+  const blocks = skillBlocks.map((skill) => skill.text).join("\n\n")
+  return {
+    content: `<inline_skills>\nThe following inline skill contents are already loaded. Do not load them again unless the user asks to inspect the source file.\n\n${blocks}\n</inline_skills>`,
+    skillBlocks: skillBlocks.map((skill) => skill.skillBlock),
+  }
 }
 
 function expandInlineSkills(
   text: string,
   skills: SkillInfo[],
-): { text: string; instruction: string } | undefined {
+): { text: string; selected: SkillInfo[] } | undefined {
   const byName = new Map(
     skills.map((skill) => [skill.name.toLowerCase(), skill]),
   )
@@ -226,8 +284,7 @@ function expandInlineSkills(
   if (selected.length === 0) return undefined
 
   rewritten = rewritten.replace(/[ \t]{2,}/g, " ").trim()
-  const instruction = buildSkillLoadInstruction(selected)
-  return { text: rewritten || text, instruction }
+  return { text: rewritten || text, selected }
 }
 
 function extractSlashSkillPrefix(textBeforeCursor: string): string | undefined {
@@ -412,10 +469,44 @@ function createSlashSkillAutocompleteProvider(
 }
 
 export default function (pi: ExtensionAPI): void {
-  let pendingSkillLoadInstruction: string | undefined
+  let pendingInlineSkillContent: string | undefined
+  let pendingInlineSkillNames: string[] = []
+  let pendingInlineSkillBlocks: ParsedSkillBlock[] = []
   let loadedSkills = new Set<string>()
 
   installSlashAutocompleteTrigger()
+
+  pi.registerMessageRenderer(
+    INLINE_SKILL_MESSAGE_TYPE,
+    (message, { expanded }, theme) => {
+      const details = message.details as InlineSkillMessageDetails | undefined
+      const names = details?.names?.length ? details.names.join(", ") : "skill"
+      const label = theme.fg(
+        "customMessageLabel",
+        `\x1b[1m[${INLINE_SKILL_MESSAGE_TYPE}]\x1b[22m`,
+      )
+
+      if (details?.skills?.length) {
+        const container = new Container()
+        for (const skill of details.skills) {
+          const component = new SkillInvocationMessageComponent(skill)
+          component.setExpanded(expanded)
+          container.addChild(component)
+        }
+        return container
+      }
+
+      const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text))
+      box.addChild(
+        new Text(
+          `${label} ${theme.fg("customMessageText", names)}${theme.fg("dim", " (ctrl+o to expand)")}`,
+          0,
+          0,
+        ),
+      )
+      return box
+    },
+  )
 
   pi.registerCommand("loaded-skills", {
     description: "List skills loaded in this session",
@@ -458,7 +549,9 @@ export default function (pi: ExtensionAPI): void {
   })
 
   pi.on("input", async (event, ctx) => {
-    pendingSkillLoadInstruction = undefined
+    pendingInlineSkillContent = undefined
+    pendingInlineSkillNames = []
+    pendingInlineSkillBlocks = []
     if (event.source === "extension" || !event.text.includes("/")) {
       return { action: "continue" }
     }
@@ -466,30 +559,59 @@ export default function (pi: ExtensionAPI): void {
       return { action: "continue" }
     }
 
-    try {
-      const expanded = expandInlineSkills(event.text, getSkills(pi))
-      if (!expanded) return { action: "continue" }
-      pendingSkillLoadInstruction = expanded.instruction
-      return {
-        action: "transform",
-        text: expanded.text,
-        ...(event.images ? { images: event.images } : {}),
+    const expanded = expandInlineSkills(event.text, getSkills(pi))
+    if (!expanded) return { action: "continue" }
+
+    const skillsToInject = expanded.selected.filter(
+      (skill) => !loadedSkills.has(skill.name),
+    )
+
+    if (skillsToInject.length > 0) {
+      try {
+        const inlineSkillContent = buildInlineSkillContent(
+          skillsToInject,
+          ctx.cwd,
+        )
+        pendingInlineSkillContent = inlineSkillContent.content
+        pendingInlineSkillBlocks = inlineSkillContent.skillBlocks
+        pendingInlineSkillNames = skillsToInject.map((skill) => skill.name)
+        for (const skill of skillsToInject) {
+          loadedSkills.add(skill.name)
+          pi.appendEntry(LOADED_SKILL_ENTRY_TYPE, { name: skill.name })
+        }
+      } catch (error) {
+        pendingInlineSkillContent = undefined
+        pendingInlineSkillNames = []
+        pendingInlineSkillBlocks = []
+        ctx.ui.notify(
+          `inline-skills: failed to load skill: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        )
       }
-    } catch (error) {
-      ctx.ui.notify(
-        `inline-skills: failed to expand skill: ${error instanceof Error ? error.message : String(error)}`,
-        "error",
-      )
-      return { action: "continue" }
+    }
+
+    return {
+      action: "transform",
+      text: expanded.text,
+      ...(event.images ? { images: event.images } : {}),
     }
   })
 
-  pi.on("before_agent_start", async (event) => {
-    if (!pendingSkillLoadInstruction) return
-    const instruction = pendingSkillLoadInstruction
-    pendingSkillLoadInstruction = undefined
+  pi.on("before_agent_start", async () => {
+    if (!pendingInlineSkillContent) return
+    const content = pendingInlineSkillContent
+    const names = pendingInlineSkillNames
+    const skills = pendingInlineSkillBlocks
+    pendingInlineSkillContent = undefined
+    pendingInlineSkillNames = []
+    pendingInlineSkillBlocks = []
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${instruction}`,
+      message: {
+        customType: INLINE_SKILL_MESSAGE_TYPE,
+        content,
+        display: true,
+        details: { names, skills },
+      },
     }
   })
 }
