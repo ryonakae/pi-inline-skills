@@ -60,11 +60,19 @@ type SkillInfo = {
 
 type LoadedSkillEntryData = {
   name?: string
+  source?: "tool-result"
 }
 
 type InlineSkillMessageDetails = {
   names?: string[]
   skills?: ParsedSkillBlock[]
+}
+
+type InlineSkillSessionEntry = {
+  type: string
+  customType?: string
+  data?: LoadedSkillEntryData
+  details?: InlineSkillMessageDetails
 }
 
 const LOADED_SKILL_ENTRY_TYPE = "loaded-skill"
@@ -191,13 +199,29 @@ function getCurrentSkillPathMap(
 function restoreLoadedSkills(ctx: ExtensionContext): Set<string> {
   const loadedSkills = new Set<string>()
 
-  for (const entry of ctx.sessionManager.getBranch()) {
-    if (entry.type !== "custom") continue
-    if (entry.customType !== LOADED_SKILL_ENTRY_TYPE) continue
+  for (const entry of ctx.sessionManager.getBranch() as InlineSkillSessionEntry[]) {
+    if (
+      entry.type === "custom" &&
+      entry.customType === LOADED_SKILL_ENTRY_TYPE
+    ) {
+      const data = entry.data
+      if (
+        data?.source === "tool-result" &&
+        typeof data.name === "string" &&
+        data.name.trim()
+      ) {
+        loadedSkills.add(data.name)
+      }
+      continue
+    }
 
-    const data = entry.data as LoadedSkillEntryData | undefined
-    if (typeof data?.name === "string" && data.name.trim()) {
-      loadedSkills.add(data.name)
+    if (
+      entry.type === "custom_message" &&
+      entry.customType === INLINE_SKILL_MESSAGE_TYPE
+    ) {
+      for (const skill of entry.details?.skills ?? []) {
+        if (skill.name.trim()) loadedSkills.add(skill.name)
+      }
     }
   }
 
@@ -258,33 +282,32 @@ function buildInlineSkillContent(
   }
 }
 
-function expandInlineSkills(
+function findInlineSkills(
   text: string,
   skills: SkillInfo[],
-): { text: string; selected: SkillInfo[] } | undefined {
+): { selected: SkillInfo[] } | undefined {
   const byName = new Map(
     skills.map((skill) => [skill.name.toLowerCase(), skill]),
   )
   const selected: SkillInfo[] = []
   const seen = new Set<string>()
 
-  let rewritten = text.replace(
+  text.replace(
     SKILL_TOKEN_RE,
-    (match, boundary: string, skillName: string) => {
+    (match, _boundary: string, skillName: string) => {
       const skill = byName.get(skillName.toLowerCase())
       if (!skill) return match
       if (!seen.has(skill.name)) {
         seen.add(skill.name)
         selected.push(skill)
       }
-      return `${boundary}\`${skill.name}\``
+      return match
     },
   )
 
   if (selected.length === 0) return undefined
 
-  rewritten = rewritten.replace(/[ \t]{2,}/g, " ").trim()
-  return { text: rewritten || text, selected }
+  return { selected }
 }
 
 function extractSlashSkillPrefix(textBeforeCursor: string): string | undefined {
@@ -545,13 +568,17 @@ export default function (pi: ExtensionAPI): void {
     if (!skillName || loadedSkills.has(skillName)) return
 
     loadedSkills.add(skillName)
-    pi.appendEntry(LOADED_SKILL_ENTRY_TYPE, { name: skillName })
+    pi.appendEntry(LOADED_SKILL_ENTRY_TYPE, {
+      name: skillName,
+      source: "tool-result",
+    })
   })
 
   pi.on("input", async (event, ctx) => {
     pendingInlineSkillContent = undefined
     pendingInlineSkillNames = []
     pendingInlineSkillBlocks = []
+    loadedSkills = restoreLoadedSkills(ctx)
     if (event.source === "extension" || !event.text.includes("/")) {
       return { action: "continue" }
     }
@@ -559,7 +586,7 @@ export default function (pi: ExtensionAPI): void {
       return { action: "continue" }
     }
 
-    const expanded = expandInlineSkills(event.text, getSkills(pi))
+    const expanded = findInlineSkills(event.text, getSkills(pi))
     if (!expanded) return { action: "continue" }
 
     const skillsToInject = expanded.selected.filter(
@@ -577,7 +604,6 @@ export default function (pi: ExtensionAPI): void {
         pendingInlineSkillNames = skillsToInject.map((skill) => skill.name)
         for (const skill of skillsToInject) {
           loadedSkills.add(skill.name)
-          pi.appendEntry(LOADED_SKILL_ENTRY_TYPE, { name: skill.name })
         }
       } catch (error) {
         pendingInlineSkillContent = undefined
@@ -592,7 +618,7 @@ export default function (pi: ExtensionAPI): void {
 
     return {
       action: "transform",
-      text: expanded.text,
+      text: event.text,
       ...(event.images ? { images: event.images } : {}),
     }
   })
