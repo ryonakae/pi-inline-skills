@@ -1,25 +1,26 @@
 {
-  "name": "@tifan/pi-inline-skills",
+  "name": "@ryonakae/pi-inline-skills",
   "version": "1.0.6",
-  "description": "Inline /skill autocomplete in the pi editor.",
+  "description": "Inline /skill autocomplete and optional Jev skill routing in the pi editor.",
   "keywords": [
     "autocomplete",
+    "jev",
     "pi",
     "pi-extension",
     "pi-package",
     "skills"
   ],
-  "homepage": "https://github.com/tifandotme/pi-extensions/tree/master/packages/pi-inline-skills#readme",
-  "bugs": "https://github.com/tifandotme/pi-extensions/issues",
+  "homepage": "https://github.com/ryonakae/pi-inline-skills#readme",
+  "bugs": "https://github.com/ryonakae/pi-inline-skills/issues",
   "license": "MIT",
   "author": "Tifan Dwi Avianto <hi@tifan.me>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tifandotme/pi-extensions.git",
-    "directory": "packages/pi-inline-skills"
+    "url": "git+https://github.com/ryonakae/pi-inline-skills.git"
   },
   "files": [
     "src/**/*.ts",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],
@@ -28,13 +29,38 @@
     "access": "public",
     "provenance": true
   },
+  "scripts": {
+    "test": "bun test",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1",
+    "@tsconfig/node24": "24.0.5",
+    "@tsconfig/strictest": "2.0.8",
+    "@types/bun": "^1.4.2",
+    "@types/node": "24.10.1",
+    "oxfmt": "0.65.0",
+    "oxlint": "1.80.0",
+    "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "@earendil-works/pi-tui": ">=0.87.1"
+  },
   "engines": {
-    "node": ">=20"
+    "bun": ">=1.1.0",
+    "node": ">=22.19.0"
   },
   "pi": {
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/tifandotme/pi-extensions/refs/heads/master/packages/pi-inline-skills/assets/skills-selector-triggered-inline.webp"
+    "image": "https://raw.githubusercontent.com/ryonakae/pi-inline-skills/refs/heads/master/assets/skills-selector-triggered-inline.webp"
   }
 }
