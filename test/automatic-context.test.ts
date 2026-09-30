@@ -1,24 +1,23 @@
 import { expect, test } from "bun:test"
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai"
+import { rmSync, writeFileSync } from "node:fs"
+import { fauxAssistantMessage } from "@earendil-works/pi-ai"
 import { restoreLoadedSkillNames } from "../src/loaded-skills.ts"
 import { bodyCount, gate, setup, text, waitFor } from "./harness.ts"
 
-test("Jev recommends a standard read without loading its body; successful read removes the instruction", async () => {
-  let path = ""
+test("Jev inserts a hidden body in the first request and notifies only after persistence", async () => {
+  const response = gate()
   const h = await setup({
     jev: true,
-    tools: true,
     responses: [
-      () =>
-        fauxAssistantMessage(fauxToolCall("read", { path }), {
-          stopReason: "toolUse",
-        }),
-      fauxAssistantMessage("done"),
+      async () => {
+        await response.promise
+        return fauxAssistantMessage("done")
+      },
     ],
   })
-  path = h.skillPaths["beta"]!
   try {
-    await h.session.prompt("/alpha investigate")
+    const run = h.session.prompt("/alpha investigate")
+    await waitFor(() => h.calls.length === 1)
     expect(h.payloads).toHaveLength(1)
     expect(h.authProviders).toEqual([])
     expect(h.requests[0]!.url).toBe("https://api.typesafe.ai/v1/systemone")
@@ -27,31 +26,54 @@ test("Jev recommends a standard read without loading its body; successful read r
       "Content-Type": "application/json",
     })
     expect(bodyCount(h.calls[0]!, "alpha")).toBe(1)
-    expect(bodyCount(h.calls[0]!, "beta")).toBe(0)
-    expect(h.calls[0]!.messages.map(text).join("\n")).toContain(`read`)
-    expect(
-      h.calls[0]!.messages.map(text).some(
-        (value) =>
-          value.includes("<skill_read_instructions>") && value.includes(path),
-      ),
-    ).toBe(true)
-    expect(h.calls[1]!.messages.map(text).join("\n")).not.toContain(
+    expect(bodyCount(h.calls[0]!, "beta")).toBe(1)
+    expect(h.calls[0]!.messages.map(text).join("\n")).not.toContain(
       "<skill_read_instructions>",
     )
-    expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
     expect(h.entries()).toHaveLength(1)
+    expect(h.notifications).not.toContain("inline-skills: loaded beta by Jev")
+
+    response.release()
+    await run
+    expect(h.entries()).toHaveLength(2)
+    expect(h.entries().map((entry) => entry.display)).toEqual([true, false])
+    expect(h.displayed).toHaveLength(1)
+    expect(h.entries()[1]!.details).toMatchObject({ source: "jev" })
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
     expect(
       [
         ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
       ].toSorted(),
     ).toEqual(["alpha", "beta"])
-    expect(JSON.stringify(h.session.sessionManager.getBranch())).not.toContain(
-      "<skill_read_instructions>",
-    )
     expect(h.payloads[0]!.state.conversation).toEqual([
       { role: "user", text: "/alpha investigate" },
     ])
     expect(JSON.stringify(h.payloads)).not.toContain("SKILL_BODY")
+  } finally {
+    response.release()
+    h.session.dispose()
+  }
+})
+
+test("a no-match Jev result stays silent and persists nothing", async () => {
+  const h = await setup({
+    jev: true,
+    fetch: async (payload) =>
+      Response.json({
+        answers: Object.fromEntries(
+          Object.keys(payload.questions).map((key) => [
+            key,
+            { type: "noul", noul: 0.1 },
+          ]),
+        ),
+      }),
+    responses: [fauxAssistantMessage("done")],
+  })
+  try {
+    await h.session.prompt("investigate")
+    expect(h.calls).toHaveLength(1)
+    expect(h.entries()).toHaveLength(0)
+    expect(h.notifications).toEqual([])
   } finally {
     h.session.dispose()
   }
@@ -162,6 +184,39 @@ test("provider retry reuses one pending credential resolution and Jev decision",
   }
 })
 
+test("provider retry reuses the constructed automatic body", async () => {
+  let betaPath = ""
+  const h = await setup({
+    jev: true,
+    settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+    responses: [
+      () => {
+        writeFileSync(betaPath, "CHANGED_SKILL_BODY")
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "rate limit exceeded",
+        })
+      },
+      fauxAssistantMessage("recovered"),
+    ],
+  })
+  betaPath = h.skillPaths["beta"]!
+  try {
+    await h.session.prompt("investigate")
+    expect(h.requests).toHaveLength(1)
+    for (const request of h.calls) {
+      expect(bodyCount(request, "beta")).toBe(1)
+      expect(request.messages.map(text).join("\n")).not.toContain(
+        "CHANGED_SKILL_BODY",
+      )
+    }
+    expect(h.entries()).toHaveLength(1)
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+  } finally {
+    h.session.dispose()
+  }
+})
+
 test("bounded current input omits a long tail from the entire Jev payload", async () => {
   const sentinel = "DROPPED_LONG_TAIL_SENTINEL"
   const h = await setup({
@@ -229,7 +284,7 @@ test("bounded queued input omits users dropped by the conversation message limit
   }
 })
 
-test("read instructions preserve descending Jev relevance order", async () => {
+test("automatic bodies preserve descending Jev relevance order", async () => {
   const h = await setup({
     jev: true,
     fetch: async (payload) =>
@@ -239,7 +294,11 @@ test("read instructions preserve descending Jev relevance order", async () => {
             key,
             {
               type: "noul",
-              noul: question.instructions.includes('"beta"') ? 0.99 : 0.9,
+              noul: question.instructions.includes('"beta"')
+                ? 0.99
+                : question.instructions.includes('"alpha"')
+                  ? 0.9
+                  : 0.1,
             },
           ]),
         ),
@@ -248,12 +307,20 @@ test("read instructions preserve descending Jev relevance order", async () => {
   })
   try {
     await h.session.prompt("investigate")
-    const instruction = h.calls[0]!.messages.map(text).find((value) =>
-      value.includes("<skill_read_instructions>"),
+    const injection = h.calls[0]!.messages.map(text).find((value) =>
+      value.includes("<inline_skills>"),
     )!
-    expect(instruction.indexOf('"beta"')).toBeLessThan(
-      instruction.indexOf('"alpha"'),
+    expect(injection.indexOf('name="beta"')).toBeLessThan(
+      injection.indexOf('name="alpha"'),
     )
+    expect(h.entries()).toHaveLength(1)
+    expect(h.entries()[0]!.details).toMatchObject({
+      names: ["beta", "alpha"],
+      source: "jev",
+    })
+    expect(h.notifications).toEqual([
+      "inline-skills: loaded beta, alpha by Jev",
+    ])
   } finally {
     h.session.dispose()
   }
@@ -278,7 +345,7 @@ test("idle context evaluation after completion cannot revive a recommendation or
   }
 })
 
-test("a continuation after a completed agent run does not revive its read instructions", async () => {
+test("a continuation after a completed agent run does not duplicate its automatic body", async () => {
   let continued = false
   const h = await setup({
     jev: true,
@@ -310,45 +377,97 @@ test("a continuation after a completed agent run does not revive its read instru
     await h.session.prompt("investigate")
     expect(h.calls).toHaveLength(2)
     expect(h.payloads).toHaveLength(1)
-    expect(h.calls[0]!.messages.map(text).join("\n")).toContain(
-      "<skill_read_instructions>",
-    )
-    expect(h.calls[1]!.messages.map(text).join("\n")).not.toContain(
-      "<skill_read_instructions>",
-    )
+    expect(bodyCount(h.calls[0]!, "beta")).toBe(1)
+    expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
+    expect(h.entries()).toHaveLength(1)
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
   } finally {
     h.session.dispose()
   }
 })
 
-test("failed read retains the recommendation for the request but never marks the skill loaded", async () => {
+test("an unreadable automatic skill warns once and can be retried by the next request", async () => {
+  let betaPath = ""
+  let removed = false
   const h = await setup({
     jev: true,
-    tools: true,
-    responses: [
-      fauxAssistantMessage(
-        fauxToolCall("read", { path: "/missing/SKILL.md" }),
-        { stopReason: "toolUse" },
-      ),
-      fauxAssistantMessage("done"),
-      fauxAssistantMessage("next"),
-    ],
+    fetch: async (payload) => {
+      if (!removed) {
+        removed = true
+        rmSync(betaPath)
+      }
+      return Response.json({
+        answers: Object.fromEntries(
+          Object.entries(payload.questions).map(([key, question]) => [
+            key,
+            {
+              type: "noul",
+              noul: question.instructions.includes('"beta"') ? 0.99 : 0.1,
+            },
+          ]),
+        ),
+      })
+    },
+    responses: [fauxAssistantMessage("first"), fauxAssistantMessage("next")],
   })
+  betaPath = h.skillPaths["beta"]!
   try {
     await h.session.prompt("investigate")
     expect(h.payloads).toHaveLength(1)
-    expect(h.calls[1]!.messages.map(text).join("\n")).toContain(
-      "<skill_read_instructions>",
-    )
+    expect(bodyCount(h.calls[0]!, "beta")).toBe(0)
     expect([
       ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
     ]).toEqual([])
     expect(h.entries()).toHaveLength(0)
-    await h.session.prompt("/beta explicit next")
-    expect(bodyCount(h.calls[2]!, "beta")).toBe(1)
-    expect(h.calls[2]!.messages.map(text).join("\n")).not.toContain(
-      "<skill_read_instructions>",
-    )
+    expect(h.notifications).toEqual(["inline-skills: failed to load beta"])
+
+    writeFileSync(h.skillPaths["beta"]!, "BETA_SKILL_BODY")
+    await h.session.prompt("investigate again")
+    expect(h.payloads).toHaveLength(2)
+    expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
+    expect(h.notifications).toEqual([
+      "inline-skills: failed to load beta",
+      "inline-skills: loaded beta by Jev",
+    ])
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("partial automatic load failure persists and notifies only successful skills", async () => {
+  let betaPath = ""
+  const h = await setup({
+    jev: true,
+    fetch: async (payload) => {
+      rmSync(betaPath)
+      return Response.json({
+        answers: Object.fromEntries(
+          Object.entries(payload.questions).map(([key, question]) => [
+            key,
+            {
+              type: "noul",
+              noul: question.instructions.includes('"plan"') ? 0.1 : 0.99,
+            },
+          ]),
+        ),
+      })
+    },
+    responses: [fauxAssistantMessage("done")],
+  })
+  betaPath = h.skillPaths["beta"]!
+  try {
+    await h.session.prompt("investigate")
+    expect(bodyCount(h.calls[0]!, "beta")).toBe(0)
+    expect(bodyCount(h.calls[0]!, "alpha")).toBe(1)
+    expect(h.entries()).toHaveLength(1)
+    expect(h.entries()[0]!.details).toMatchObject({
+      names: ["alpha"],
+      source: "jev",
+    })
+    expect(h.notifications).toEqual([
+      "inline-skills: failed to load beta",
+      "inline-skills: loaded alpha by Jev",
+    ])
   } finally {
     h.session.dispose()
   }
@@ -384,6 +503,41 @@ test("all-at-once users form one automatic batch; identical later input is a dis
     ).toHaveLength(2)
     await h.session.prompt("investigate")
     expect(h.payloads).toHaveLength(3)
+  } finally {
+    hold.release()
+    h.session.dispose()
+  }
+})
+
+test("abort after automatic insertion preserves the body and notifies only its persisted load", async () => {
+  const hold = gate()
+  const h = await setup({
+    jev: true,
+    responses: [
+      async () => {
+        await hold.promise
+        return fauxAssistantMessage("interrupted")
+      },
+      fauxAssistantMessage("next"),
+    ],
+  })
+  try {
+    const run = h.session.prompt("investigate")
+    await waitFor(() => h.calls.length === 1)
+    expect(bodyCount(h.calls[0]!, "beta")).toBe(1)
+    expect(h.entries()).toHaveLength(0)
+    expect(h.notifications).toEqual([])
+    const aborting = h.session.abort()
+    hold.release()
+    await aborting
+    await run
+    expect(h.entries()).toHaveLength(1)
+    expect(h.entries()[0]!.display).toBe(false)
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    await h.session.prompt("/beta continue")
+    expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
+    expect(h.entries()).toHaveLength(1)
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
   } finally {
     hold.release()
     h.session.dispose()
@@ -433,10 +587,7 @@ test.each(["abort", "tree", "switch", "end"] as const)(
       hold.release()
       await aborting
       await run
-      for (const call of h.calls)
-        expect(call.messages.map(text).join("\n")).not.toContain(
-          "<skill_read_instructions>",
-        )
+      for (const call of h.calls) expect(bodyCount(call, "beta")).toBe(0)
       if (event === "abort") expect(h.calls).toHaveLength(0)
       else expect(h.calls).toHaveLength(1)
       expect([

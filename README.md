@@ -4,7 +4,7 @@ This is an independently maintained fork of [Tifan Dwi Avianto's `pi-inline-skil
 
 The main changes from upstream are:
 
-- Optional Jev skill recommendations through TypeSafe or OpenRouter in the main session, loaded through Pi's standard `read` tool rather than automatic body insertion. OpenRouter uses Pi's standard provider authentication.
+- Optional Jev skill selection through TypeSafe or OpenRouter in the main session. Selected skill bodies are inserted into the current model request and saved as hidden session messages. OpenRouter uses Pi's standard provider authentication.
 - Bounded, sanitized selection context, explicit-only skill exclusions, and child-session detection shared with the [pi-subagents fork](https://github.com/ryonakae/pi-subagents/tree/feat/jev-routing).
 - Manual skill loading tied to the input Pi actually consumes, preventing failed or cancelled inputs from leaking skill bodies into later requests. Existing `/skill-name` completion and loaded-skill tracking remain available.
 
@@ -12,7 +12,7 @@ These changes are maintained for this fork's own use, rather than as an upstream
 
 Load Pi skills anywhere in a prompt, with optional Jev-based suggestions.
 
-Type an inline `/skill-name` token to keep writing without replacing your prompt. When enabled, Jev recommends up to three supporting skills and asks the model to load them with Pi's standard `read` tool.
+Type an inline `/skill-name` token to keep writing without replacing your prompt. When enabled, Jev selects and loads up to three supporting skill bodies before the model responds.
 
 ![Inline skill autocomplete picker](https://raw.githubusercontent.com/ryonakae/pi-inline-skills/refs/heads/master/assets/skills-selector-triggered-inline.webp)
 
@@ -38,7 +38,7 @@ The extension leaves Pi's prompt expansion unchanged. For a normal input, it res
 
 Pi handles native `/skill:name` expansion. Slash references inside expanded skill bodies do not request additional manual loads.
 
-Run `/loaded-skills` to list skills loaded on the current session branch.
+Run `/loaded-skills` to list the historical skills loaded on the current session branch. This list is an audit of branch usage, not a claim that every body still exists in the current model context.
 
 ## Automatic selection with Jev
 
@@ -56,14 +56,7 @@ Automatic selection is off by default. Create the global configuration at `~/.pi
     "maxSkills": 3,
     "historyMessages": 6,
     "historyChars": 12000,
-    "excludedSkills": [
-      "ask-codex",
-      "commit-push",
-      "doc-updater",
-      "herdr",
-      "implement",
-      "plan"
-    ]
+    "excludedSkills": []
   }
 }
 ```
@@ -105,11 +98,11 @@ For each consumed batch of user messages, the extension resolves credentials onl
 - candidate skill names and descriptions;
 - explicitly requested and already loaded skill names.
 
-It excludes tool results, thinking blocks, images, expanded skill contents, and custom messages. It removes all skill blocks from both current and historical text; malformed or unclosed blocks cause the whole containing text to be omitted. This does not identify secrets quoted in arbitrary prose. It sends the API key only in the `Authorization` header. Diagnostics contain skill names, Noul scores, latency, truncation state, and failure categories; they do not contain the key, conversation text, input text, authentication errors, or API error bodies.
+It excludes tool results, thinking blocks, images, expanded skill contents, and custom messages, including hidden automatically loaded bodies. It removes all skill blocks from both current and historical text; malformed or unclosed blocks cause the whole containing text to be omitted. This does not identify secrets quoted in arbitrary prose. It sends the API key only in the `Authorization` header. Routine candidate, score, latency, truncation, and no-match diagnostics are not displayed. Failures are reported by sanitized category without the key, conversation text, input text, authentication errors, or API error bodies.
 
 `timeoutMs` covers the System One HTTP request and response-body read. OpenRouter credential resolution happens before that timeout and follows Pi's standard behavior. In particular, a saved `!command` credential runs synchronously with Pi's own timeout of up to 10 seconds and is cached for the process lifetime, so a `timeoutMs` of 5000 does not impose a five-second limit on authentication plus HTTP combined. If the request is aborted or its session or input batch changes while authentication is pending, the extension does not start the HTTP request afterward.
 
-Each candidate receives a Noul score in the same request. Jev recommends skills at or above `minRelevance` in descending score order, up to `maxSkills`. The extension adds their names and file paths to a request-local instruction to use `read`; it does not insert their bodies, invent tool results, or mark them loaded. The model may decline to read them. Successful reads remove the corresponding instructions. New consumed inputs, aborts, run completion, and branch/session changes invalidate old recommendations. These instructions are not saved in session history.
+Each candidate receives a Noul score in the same request. The extension loads skills at or above `minRelevance` in descending score order, up to `maxSkills`. It reads each selected `SKILL.md`, inserts the existing inline skill block into that model request, and queues the same content as an `inline-skill` custom message with `display: false`. It does not invent tool calls or tool results. After Pi confirms persistence, one notification reports the successfully loaded names, for example `inline-skills: loaded use-zellij, worktrunk by Jev`. Unreadable files produce an error notification; readable selections still load together. No match is silent. New consumed inputs, aborts, run completion, and branch/session changes invalidate stale selections. Provider retries reuse both the Jev decision and the already built body without duplicate storage or notification.
 
 The extension skips requests exceeding `maxRequestBytes` rather than silently removing candidates. With Jev disabled, it makes no Jev HTTP requests.
 
@@ -117,12 +110,14 @@ Automatic selection requires the read-only `globalThis[Symbol.for("pi-subagents:
 
 ## Loading rules
 
-- Manual insertion, native expansion, and successful `read` results establish loaded state on the active branch. The extension suppresses repeated manual insertion and recommendations for those skills, including after reload and compaction. Recommendations alone and failed reads do not establish loaded state. Pi still controls native expansion.
-- `excludedSkills` and `disable-model-invocation: true` affect automatic selection only. Explicit `/skill-name` tokens still load those skills.
+- Manual insertion, automatic insertion, native expansion, and successful `read` results establish effective loaded state only while their actual body remains in Pi's projected context. The extension recomputes this state for each load decision. A compaction or context edit that removes a body makes the skill eligible again; a retained body still suppresses duplicates. Historical names, summaries, and metadata alone do not suppress loading, and the extension does not eagerly restore every previously used skill after compaction. Pi still controls native expansion.
+- `/loaded-skills` remains a branch-history list across compaction and context edits, so it can include names whose bodies are no longer effective.
+- `excludedSkills` and `disable-model-invocation: true` affect automatic selection only. Explicit `/skill-name` tokens still load those skills. Use `"excludedSkills": []` for no name-based exclusions; omitting the setting keeps the package default unchanged.
 - Pi dispatches registered commands before the extension handles an accepted agent prompt. Matching slash tokens in the final expanded request are manual skill requests, even when a template produced a command-like prefix.
 - Jev errors, timeouts, invalid responses, and missing or failed credentials skip automatic selection without discarding explicit skills. Credentials are never borrowed from the other provider.
-- All-at-once queues process the whole consumed user batch. Request-local manual injection and saved-message deduplication are separate, so retries retain the body without duplicate display or storage.
-- Pi saves queued manual bodies already supplied to a request even when that turn errors or aborts. Unconsumed or cleared inputs have no pending bodies to leak into later requests.
+- All-at-once queues process the whole consumed user batch. Manual and automatic request-local injection have independent saved-message deduplication, so neither suppresses the other and retries retain each body without duplicate display, storage, or success notification.
+- Pi saves queued bodies already supplied to a request even when that turn errors or aborts. Unconsumed or cleared inputs have no pending bodies to leak into later requests.
+- Loading a skill provides instructions to the model; it does not bypass the skill's execution conditions, approval requirements, sandbox, or tool permissions.
 
 ![Loaded skills command output](https://raw.githubusercontent.com/ryonakae/pi-inline-skills/refs/heads/master/assets/loaded-skills-output.webp)
 

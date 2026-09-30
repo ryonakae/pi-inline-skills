@@ -1,13 +1,38 @@
 import { expect, test } from "bun:test"
 import { fauxAssistantMessage } from "@earendil-works/pi-ai"
-import { bodyCount, gate, setup, text, waitFor } from "./harness.ts"
+import { bodyCount, gate, setup, waitFor } from "./harness.ts"
 
 test.each(["steer", "followUp"] as const)(
-  "queued %s selects only when consumed and receives read instructions, not bodies",
+  "queued %s selects only when consumed and receives the automatic body",
   async (streamingBehavior) => {
     const hold = gate()
+    let settlements = 0
     const h = await setup({
       jev: true,
+      fetch: async (payload) => {
+        const selected =
+          payload.state.currentInput === "initial" ? "alpha" : "beta"
+        return Response.json({
+          answers: Object.fromEntries(
+            Object.entries(payload.questions).map(([key, question]) => [
+              key,
+              {
+                type: "noul",
+                noul: question.instructions.includes(`"${selected}"`)
+                  ? 0.99
+                  : 0.1,
+              },
+            ]),
+          ),
+        })
+      },
+      extensions: [
+        (pi) => {
+          pi.on("agent_settled", () => {
+            settlements++
+          })
+        },
+      ],
       responses: [
         async () => {
           await hold.promise
@@ -19,18 +44,27 @@ test.each(["steer", "followUp"] as const)(
     try {
       const run = h.session.prompt("initial")
       await waitFor(() => h.calls.length === 1)
-      await h.session.prompt("/alpha investigate", { streamingBehavior })
+      await h.session.prompt("/plan investigate", { streamingBehavior })
       expect(h.payloads).toHaveLength(1)
+      expect(bodyCount(h.calls[0]!, "beta")).toBe(0)
       hold.release()
       await run
       expect(h.payloads).toHaveLength(2)
-      expect(h.payloads[1]!.state.currentInput).toBe("/alpha investigate")
+      expect(h.payloads[1]!.state.currentInput).toBe("/plan investigate")
       expect(bodyCount(h.calls[1]!, "alpha")).toBe(1)
-      expect(bodyCount(h.calls[1]!, "beta")).toBe(0)
-      expect(h.calls[1]!.messages.map(text).join("\n")).toContain(
-        "<skill_read_instructions>",
-      )
-      expect(h.entries()).toHaveLength(1)
+      expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
+      expect(bodyCount(h.calls[1]!, "plan")).toBe(1)
+      expect(h.entries()).toHaveLength(3)
+      expect(h.entries().map((entry) => entry.display)).toEqual([
+        false,
+        true,
+        false,
+      ])
+      expect(h.notifications).toEqual([
+        "inline-skills: loaded alpha by Jev",
+        "inline-skills: loaded beta by Jev",
+      ])
+      expect(settlements).toBe(1)
     } finally {
       hold.release()
       h.session.dispose()
@@ -65,7 +99,11 @@ test.each(["steer", "followUp"] as const)(
         "unrelated",
       ])
       expect(bodyCount(h.calls[1]!, "alpha")).toBe(0)
-      expect(h.entries()).toHaveLength(0)
+      expect(h.entries()).toHaveLength(1)
+      expect(h.entries()[0]!.details).toMatchObject({
+        names: ["beta"],
+        source: "jev",
+      })
     } finally {
       hold.release()
       h.session.dispose()

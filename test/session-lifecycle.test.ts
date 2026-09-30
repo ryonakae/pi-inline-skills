@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { join } from "node:path"
-import { fauxAssistantMessage } from "@earendil-works/pi-ai"
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai"
 import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
@@ -31,7 +31,8 @@ test("tree navigation restores only the active branch, including identical manua
     expect(h.entries()).toHaveLength(0)
     await h.session.prompt("/alpha same")
     expect(bodyCount(h.calls[1]!, "alpha")).toBe(1)
-    expect(h.entries()).toHaveLength(1)
+    expect(h.entries()).toHaveLength(2)
+    expect(h.entries().map((entry) => entry.display)).toEqual([true, false])
     expect(h.payloads).toHaveLength(2)
   } finally {
     h.session.dispose()
@@ -162,7 +163,7 @@ test("a batch change while credentials are pending sends only the current batch"
   }
 })
 
-test("compaction keeps branch load records without reinserting compacted bodies", async () => {
+test("compaction keeps historical load records while allowing a missing manual body to reload", async () => {
   const h = await setup({
     settings: { compaction: { keepRecentTokens: 1 } },
     extensions: [
@@ -187,11 +188,186 @@ test("compaction keeps branch load records without reinserting compacted bodies"
     await h.session.prompt("another turn")
     await h.session.compact()
     await h.session.prompt("/alpha again")
-    expect(bodyCount(h.calls[2]!, "alpha")).toBe(0)
+    expect(bodyCount(h.calls[2]!, "alpha")).toBe(1)
+    expect(h.entries()).toHaveLength(2)
+    expect([
+      ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
+    ]).toEqual(["alpha"])
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("compaction lets a missing automatic body be selected again without restoring it eagerly", async () => {
+  const h = await setup({
+    jev: true,
+    settings: { compaction: { keepRecentTokens: 1 } },
+    extensions: [
+      (pi) => {
+        pi.on("session_before_compact", (event) => ({
+          compaction: {
+            summary: "The beta skill was used.",
+            firstKeptEntryId: event.branchEntries.at(-1)!.id,
+            tokensBefore: 100,
+          },
+        }))
+      },
+    ],
+    responses: [
+      fauxAssistantMessage("first"),
+      fauxAssistantMessage("second"),
+      fauxAssistantMessage("third"),
+    ],
+  })
+  try {
+    await h.session.prompt("investigate")
+    await h.session.prompt("another turn")
+    await h.session.compact()
+    await h.session.prompt("investigate again")
+    expect(h.payloads.at(-1)!.state.loadedSkills).not.toContain("beta")
+    expect(bodyCount(h.calls[2]!, "beta")).toBe(1)
+    expect(h.entries()).toHaveLength(2)
+    expect(h.notifications).toEqual([
+      "inline-skills: loaded beta by Jev",
+      "inline-skills: loaded beta by Jev",
+    ])
+    expect([
+      ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
+    ]).toEqual(["beta"])
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("context edit lets a removed automatic body be selected again", async () => {
+  const h = await setup({
+    jev: true,
+    responses: [fauxAssistantMessage("first"), fauxAssistantMessage("second")],
+  })
+  try {
+    await h.session.prompt("investigate")
+    const automatic = h.entries()[0]!
+    h.session.sessionManager.appendContextEdit(automatic.id, {
+      content: "body removed",
+    })
+    await h.session.prompt("investigate again")
+    expect(h.payloads[1]!.state.loadedSkills).not.toContain("beta")
+    expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
+    expect(h.entries()).toHaveLength(2)
+    expect(h.notifications).toEqual([
+      "inline-skills: loaded beta by Jev",
+      "inline-skills: loaded beta by Jev",
+    ])
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("a compacted native body can be loaded manually without changing native expansion", async () => {
+  const h = await setup({
+    responses: [fauxAssistantMessage("first"), fauxAssistantMessage("second")],
+  })
+  try {
+    await h.session.prompt("/skill:alpha first")
+    const assistant = h.session.sessionManager
+      .getBranch()
+      .findLast(
+        (entry) =>
+          entry.type === "message" && entry.message.role === "assistant",
+      )!
+    h.session.sessionManager.appendCompaction(
+      "The alpha skill was used.",
+      assistant.id,
+      100,
+    )
+    await h.session.prompt("/alpha again")
+    expect(bodyCount(h.calls[0]!, "alpha")).toBe(1)
+    expect(bodyCount(h.calls[1]!, "alpha")).toBe(1)
+    expect(h.entries()).toHaveLength(1)
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("successful read state follows the projected result across compaction and context edit", async () => {
+  let path = ""
+  const h = await setup({
+    tools: true,
+    responses: [
+      () =>
+        fauxAssistantMessage(fauxToolCall("read", { path }), {
+          stopReason: "toolUse",
+        }),
+      fauxAssistantMessage("read complete"),
+      fauxAssistantMessage("kept"),
+      fauxAssistantMessage("reloaded"),
+    ],
+  })
+  path = h.skillPaths["alpha"]!
+  try {
+    await h.session.prompt("inspect alpha")
+    const branch = h.session.sessionManager.getBranch()
+    const result = branch.find(
+      (entry) =>
+        entry.type === "message" && entry.message.role === "toolResult",
+    )!
+    const record = branch.find(
+      (entry) => entry.type === "custom" && entry.customType === "loaded-skill",
+    )!
+    expect(branch.indexOf(record)).toBeGreaterThan(branch.indexOf(result))
+
+    h.session.sessionManager.appendCompaction(
+      "The alpha skill was read.",
+      result.id,
+      100,
+    )
+    await h.session.prompt("/alpha while result remains")
+    expect(bodyCount(h.calls[2]!, "alpha")).toBe(1)
+    expect(h.entries()).toHaveLength(0)
+
+    h.session.sessionManager.appendContextEdit(result.id, null)
+    await h.session.prompt("/alpha after result removal")
+    expect(bodyCount(h.calls[3]!, "alpha")).toBe(1)
     expect(h.entries()).toHaveLength(1)
     expect([
       ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
     ]).toEqual(["alpha"])
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("legacy read results retained without their calls still prevent duplicate loading", async () => {
+  const h = await setup({
+    responses: [fauxAssistantMessage("kept"), fauxAssistantMessage("reloaded")],
+  })
+  try {
+    const manager = h.session.sessionManager
+    const call = fauxToolCall("read", { path: h.skillPaths["alpha"]! })
+    manager.appendMessage(fauxAssistantMessage(call, { stopReason: "toolUse" }))
+    manager.appendCustomEntry("loaded-skill", {
+      name: "alpha",
+      source: "tool-result",
+    })
+    const resultId = manager.appendMessage({
+      role: "toolResult",
+      toolCallId: call.id,
+      toolName: "read",
+      content: [{ type: "text", text: "ALPHA_SKILL_BODY" }],
+      isError: false,
+      timestamp: Date.now(),
+    })
+    manager.appendMessage(fauxAssistantMessage("legacy read complete"))
+    manager.appendCompaction("Alpha was used.", resultId, 100)
+    await h.session.prompt("/alpha while legacy result remains")
+    expect(bodyCount(h.calls[0]!, "alpha")).toBe(1)
+    expect(h.entries()).toHaveLength(0)
+
+    manager.appendContextEdit(resultId, null)
+    await h.session.prompt("/alpha after legacy result removal")
+    expect(bodyCount(h.calls[1]!, "alpha")).toBe(1)
+    expect(h.entries()).toHaveLength(1)
+    expect([...restoreLoadedSkillNames(manager.getBranch())]).toEqual(["alpha"])
   } finally {
     h.session.dispose()
   }
@@ -271,7 +447,7 @@ test("runtime newSession, fork, and switch recreate extension state against the 
             entry.type === "custom_message" &&
             entry.customType === "inline-skill",
         ),
-    ).toHaveLength(1)
+    ).toHaveLength(2)
     expect(h.payloads).toHaveLength(4)
   } finally {
     await runtime.dispose()

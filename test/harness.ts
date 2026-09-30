@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   createAgentSession,
+  type CustomMessageEntry,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
@@ -252,7 +253,8 @@ export async function setup(options: {
     if (
       event.type === "message_start" &&
       event.message.role === "custom" &&
-      event.message.customType === "inline-skill"
+      event.message.customType === "inline-skill" &&
+      event.message.display
     )
       displayed.push(text(event.message))
   })
@@ -275,7 +277,7 @@ export async function setup(options: {
       session.sessionManager
         .getBranch()
         .filter(
-          (entry) =>
+          (entry): entry is CustomMessageEntry =>
             entry.type === "custom_message" &&
             entry.customType === "inline-skill",
         ),

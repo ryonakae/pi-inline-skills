@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add optional main-session skill recommendations through TypeSafe System One, using one Noul request per consumed input batch and request-local instructions for the standard `read` tool.
+- Add optional main-session skill selection through TypeSafe System One, using one Noul request per consumed input batch and request-local skill body insertion.
 - Add bounded conversation extraction, global Jev configuration, child-session compatibility checks, safe HTTP diagnostics, and queued steer/follow-up integration.
 - Add explicit TypeSafe and OpenRouter Jev providers, with provider-specific endpoints and model defaults. OpenRouter uses Pi's standard provider authentication.
 - Add standalone Bun tests and format, lint, and typecheck commands.
@@ -12,11 +12,11 @@
 ### Changed
 
 - Resolve normal manual tokens from `before_agent_start.prompt`; resolve queued tokens from consumed user entries instead of input reservations. Queued bodies reach the model before the response, with custom-message display and persistence at turn end.
-- Reuse Jev decisions on provider retry, including pending credential resolution, and discard stale recommendations on successful reads, abort, completion, and branch/session changes. Keep recommendations out of persisted history and loaded state.
+- Reuse Jev decisions and constructed skill bodies on provider retry, including pending credential resolution, and discard stale selections on abort, completion, and branch/session changes. Persist successful automatic bodies as hidden inline-skill messages and notify once after persistence.
 - Defer credential resolution until an eligible candidate batch needs it. Authentication failures skip automatic recommendations without affecting explicit skill loading or falling back across providers.
 - Process expanded templates and other extensions' user messages without expanding them twice. Strip all skill blocks from current and historical Jev input, omitting malformed text.
-- Track native skill expansion and successful canonicalized `read` results when suppressing duplicate loads.
-- Preserve manual loading for excluded and `disable-model-invocation` skills while applying those controls to automatic candidates.
+- Separate historical branch load records from effective projected bodies. Track manual and automatic inline messages, native expansion, and successful canonicalized `read` results so compaction or context edits can make missing bodies eligible again without eagerly restoring old skills.
+- Preserve manual loading for excluded and `disable-model-invocation` skills while applying those controls to automatic candidates. Keep no-match selection silent and report partial load failures without suppressing successful skills.
 - Extract the package from `tifandotme/pi-extensions` into `ryonakae/pi-inline-skills` with its filtered history and original MIT license.
 
 ## 1.0.6

@@ -98,6 +98,15 @@ test("a template whose expansion starts with another template is not expanded tw
 test("native skill bodies do not activate slash references inside the body", async () => {
   const h = await setup({
     jev: true,
+    fetch: async (payload) =>
+      Response.json({
+        answers: Object.fromEntries(
+          Object.keys(payload.questions).map((key) => [
+            key,
+            { type: "noul", noul: 0.1 },
+          ]),
+        ),
+      }),
     skillBody: { alpha: "ALPHA_SKILL_BODY mentions /beta and /plan" },
     responses: [fauxAssistantMessage("done")],
   })
@@ -227,6 +236,7 @@ test("fetch excludes all current/history skill bodies, custom/tool/thinking/imag
       ),
     ).toHaveLength(1)
     expect(JSON.stringify(h.payloads)).not.toContain("SECRET_")
+    expect(JSON.stringify(h.payloads)).not.toContain("BETA_SKILL_BODY")
     expect(JSON.stringify(h.payloads)).not.toContain("iVBORw0KGgo")
   } finally {
     h.session.dispose()

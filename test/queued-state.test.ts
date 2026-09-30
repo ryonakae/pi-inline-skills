@@ -63,12 +63,14 @@ test("provider retry reuses the batch decision and delivers a queued body once p
     ])
     for (const request of h.calls.slice(1)) {
       expect(bodyCount(request, "alpha")).toBe(1)
-      expect(request.messages.map(text).join("\n")).toContain(
+      expect(bodyCount(request, "beta")).toBe(1)
+      expect(request.messages.map(text).join("\n")).not.toContain(
         "<skill_read_instructions>",
       )
     }
-    expect(h.entries()).toHaveLength(1)
+    expect(h.entries()).toHaveLength(2)
     expect(h.displayed).toHaveLength(1)
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
   } finally {
     hold.release()
     h.session.dispose()
