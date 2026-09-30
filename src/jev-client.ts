@@ -1,6 +1,9 @@
 import type { JevSettings } from "./config.ts"
 
-const SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone"
+const SYSTEM_ONE_URL = {
+  typesafe: "https://api.typesafe.ai/v1/systemone",
+  openrouter: "https://openrouter.ai/api/v1/systemone",
+} as const
 
 type Candidate = {
   name: string
@@ -121,16 +124,19 @@ export async function selectSkills(
   let response: Response
   const signal = combinedSignal(options.settings.timeoutMs, options.signal)
   try {
-    response = await (options.fetch ?? globalThis.fetch)(SYSTEM_ONE_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${options.apiKey}`,
-        "Content-Type": "application/json",
+    response = await (options.fetch ?? globalThis.fetch)(
+      SYSTEM_ONE_URL[options.settings.provider],
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${options.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body,
+        redirect: "error",
+        signal,
       },
-      body,
-      redirect: "error",
-      signal,
-    })
+    )
   } catch {
     if (options.signal?.aborted) throw new JevSelectionError("aborted")
     if (signal.aborted) throw new JevSelectionError("timeout")

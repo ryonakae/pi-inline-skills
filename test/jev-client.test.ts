@@ -68,6 +68,34 @@ test("one System One POST ranks all Noul answers without exposing the key", asyn
   ])
 })
 
+test("OpenRouter uses its fixed System One endpoint and provider-default model", async () => {
+  const settings = structuredClone(DEFAULT_SETTINGS.jev)
+  settings.provider = "openrouter"
+  settings.model = "typesafe/jev-1.13"
+  let capturedUrl = ""
+  let capturedBody: { model?: string } = {}
+
+  await selectSkills(
+    options({
+      settings,
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        capturedUrl = String(input)
+        capturedBody = JSON.parse(String(init?.body)) as { model?: string }
+        return Response.json({
+          answers: {
+            skill_0: { type: "noul", noul: 0.9 },
+            skill_1: { type: "noul", noul: 0.8 },
+            skill_2: { type: "noul", noul: 0.7 },
+          },
+        })
+      },
+    }),
+  )
+
+  expect(capturedUrl).toBe("https://openrouter.ai/api/v1/systemone")
+  expect(capturedBody.model).toBe("typesafe/jev-1.13")
+})
+
 test("request size is enforced in UTF-8 bytes before fetch", async () => {
   let calls = 0
   const settings = structuredClone(DEFAULT_SETTINGS.jev)

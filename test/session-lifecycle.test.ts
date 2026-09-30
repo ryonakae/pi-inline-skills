@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import inlineSkills from "../src/index.ts"
 import { restoreLoadedSkillNames } from "../src/loaded-skills.ts"
-import { bodyCount, setup, text } from "./harness.ts"
+import { bodyCount, setup, text, waitFor } from "./harness.ts"
 
 test("tree navigation restores only the active branch, including identical manual input", async () => {
   const h = await setup({
@@ -71,6 +71,93 @@ test("reload restores persisted loads and reads updated virtual templates withou
       "<skill_read_instructions>",
     )
   } finally {
+    h.session.dispose()
+  }
+})
+
+test.each(["abort", "tree", "switch", "end"] as const)(
+  "credentials resolving after %s do not start Jev HTTP",
+  async (event) => {
+    let releaseAuth!: (key: string) => void
+    const auth = new Promise<string>((resolve) => {
+      releaseAuth = resolve
+    })
+    const h = await setup({
+      jev: true,
+      jevProvider: "openrouter",
+      resolveOpenRouterKey: () => auth,
+      responses: [fauxAssistantMessage("done")],
+    })
+    try {
+      const run = h.session.prompt("investigate")
+      await waitFor(() => h.authProviders.length === 1)
+      let aborting: Promise<void> | undefined
+      if (event === "abort") aborting = h.session.abort()
+      else if (event === "tree")
+        await h.session.extensionRunner.emit({
+          type: "session_tree",
+          newLeafId: "new",
+          oldLeafId: "old",
+        })
+      else if (event === "switch")
+        await h.session.extensionRunner.emit({
+          type: "session_before_switch",
+          reason: "new",
+        })
+      else
+        await h.session.extensionRunner.emit({
+          type: "agent_end",
+          messages: [],
+        })
+      releaseAuth("OPENROUTER_SYNTHETIC_KEY")
+      await aborting
+      await run
+      expect(h.requests).toEqual([])
+      expect(h.authProviders).toEqual(["openrouter"])
+      for (const call of h.calls) {
+        expect(call.messages.map(text).join("\n")).not.toContain(
+          "<skill_read_instructions>",
+        )
+      }
+    } finally {
+      releaseAuth("OPENROUTER_SYNTHETIC_KEY")
+      h.session.dispose()
+    }
+  },
+)
+
+test("a batch change while credentials are pending sends only the current batch", async () => {
+  let releaseAuth!: (key: string) => void
+  const auth = new Promise<string>((resolve) => {
+    releaseAuth = resolve
+  })
+  const h = await setup({
+    jev: true,
+    jevProvider: "openrouter",
+    resolveOpenRouterKey: () => auth,
+    responses: [fauxAssistantMessage("done")],
+  })
+  try {
+    const run = h.session.prompt("original batch")
+    await waitFor(() => h.authProviders.length === 1)
+    h.session.sessionManager.appendMessage({
+      role: "user",
+      content: "replacement batch",
+      timestamp: Date.now(),
+    })
+    const currentContext = h.session.extensionRunner.emitContext(
+      h.session.sessionManager.buildSessionProjection().messages,
+    )
+    await waitFor(() => h.authProviders.length === 2)
+    releaseAuth("OPENROUTER_SYNTHETIC_KEY")
+    await currentContext
+    await run
+    expect(h.requests).toHaveLength(1)
+    expect(h.payloads[0]!.state.currentInput).toBe(
+      "original batch\n\nreplacement batch",
+    )
+  } finally {
+    releaseAuth("OPENROUTER_SYNTHETIC_KEY")
     h.session.dispose()
   }
 })

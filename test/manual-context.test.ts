@@ -43,6 +43,31 @@ test("manual exclusions remain loadable, and unreadable explicit skills do not b
   }
 })
 
+test("manual injection survives OpenRouter auth failure without leaking the error", async () => {
+  const h = await setup({
+    jev: true,
+    jevProvider: "openrouter",
+    resolveOpenRouterKey: async () => {
+      throw new Error("AUTH_SECRET_SENTINEL")
+    },
+    responses: [fauxAssistantMessage("done")],
+  })
+  try {
+    await h.session.prompt("/alpha investigate")
+    expect(bodyCount(h.calls[0]!, "alpha")).toBe(1)
+    expect(h.authProviders).toEqual(["openrouter"])
+    expect(h.requests).toEqual([])
+    expect(JSON.stringify(h.notifications)).not.toContain(
+      "AUTH_SECRET_SENTINEL",
+    )
+    expect(h.notifications).toContain(
+      "inline-skills: Jev selection skipped (unknown)",
+    )
+  } finally {
+    h.session.dispose()
+  }
+})
+
 test("consecutive one-at-a-time users get only their consumed manual skills", async () => {
   const hold = gate()
   const h = await setup({

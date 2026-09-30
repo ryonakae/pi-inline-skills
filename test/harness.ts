@@ -19,7 +19,8 @@ const globals = globalThis as Record<PropertyKey, unknown>
 const original = {
   fetch: globalThis.fetch,
   dir: process.env["PI_CODING_AGENT_DIR"],
-  key: process.env["TYPESAFE_API_KEY"],
+  typesafeKey: process.env["TYPESAFE_API_KEY"],
+  openRouterKey: process.env["OPENROUTER_API_KEY"],
   accessor: globals[symbol],
 }
 const roots: string[] = []
@@ -27,7 +28,8 @@ afterEach(() => {
   globalThis.fetch = original.fetch
   for (const [key, value] of [
     ["PI_CODING_AGENT_DIR", original.dir],
-    ["TYPESAFE_API_KEY", original.key],
+    ["TYPESAFE_API_KEY", original.typesafeKey],
+    ["OPENROUTER_API_KEY", original.openRouterKey],
   ] as const) {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
@@ -92,6 +94,9 @@ export type Payload = {
 export async function setup(options: {
   responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]
   jev?: boolean
+  jevProvider?: "typesafe" | "openrouter"
+  jevMaxSkills?: number
+  resolveOpenRouterKey?: () => Promise<string | undefined>
   child?: boolean | "unknown"
   settings?: Parameters<typeof SettingsManager.inMemory>[0]
   extensions?: ExtensionFactory[]
@@ -111,7 +116,15 @@ export async function setup(options: {
   })
   writeFileSync(
     join(agentDir, "extensions", "pi-inline-skills", "config.json"),
-    JSON.stringify({ jev: { enabled: options.jev ?? false } }),
+    JSON.stringify({
+      jev: {
+        enabled: options.jev ?? false,
+        ...(options.jevProvider ? { provider: options.jevProvider } : {}),
+        ...(options.jevMaxSkills === undefined
+          ? {}
+          : { maxSkills: options.jevMaxSkills }),
+      },
+    }),
   )
   const skillPaths = Object.fromEntries(
     ["alpha", "beta", "plan"].map((name) => {
@@ -127,6 +140,8 @@ export async function setup(options: {
   )
   process.env["PI_CODING_AGENT_DIR"] = agentDir
   process.env["TYPESAFE_API_KEY"] = "test-key"
+  delete process.env["OPENROUTER_API_KEY"]
+  const authPath = join(agentDir, "auth.json")
   if (options.child === "unknown") delete globals[symbol]
   else
     globals[symbol] = Object.freeze({
@@ -134,7 +149,9 @@ export async function setup(options: {
       isChildSession: () => options.child ?? false,
     })
   const payloads: Payload[] = []
-  globalThis.fetch = (async (_url, init) => {
+  const requests: Array<{ url: string; init?: RequestInit }> = []
+  globalThis.fetch = (async (url, init) => {
+    requests.push({ url: String(url), ...(init ? { init } : {}) })
     const payload = JSON.parse(String(init?.body)) as Payload
     payloads.push(payload)
     if (options.fetch) return options.fetch(payload, init)
@@ -149,6 +166,8 @@ export async function setup(options: {
     )
     return Response.json({ answers })
   }) as typeof fetch
+  const authProviders: string[] = []
+  const notifications: string[] = []
   const calls: TranscriptContext[] = []
   const faux = fauxProvider({
     provider: `inline-regression-${roots.length}-${Date.now()}`,
@@ -196,6 +215,7 @@ export async function setup(options: {
   await loader.reload()
   const modelRuntime = await ModelRuntime.create({
     allowModelNetwork: false,
+    authPath,
     modelsPath: null,
     refreshOnCreate: false,
   })
@@ -210,6 +230,23 @@ export async function setup(options: {
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
   })
+  const ui = session.extensionRunner.getUIContext()
+  const originalNotify = ui.notify.bind(ui)
+  ui.notify = (message, level) => {
+    notifications.push(message)
+    originalNotify(message, level)
+  }
+  if (options.jevProvider === "openrouter") {
+    session.extensionRunner.getModelRegistry().getApiKeyForProvider = async (
+      provider,
+    ) => {
+      authProviders.push(provider)
+      if (provider !== "openrouter") return undefined
+      return options.resolveOpenRouterKey
+        ? options.resolveOpenRouterKey()
+        : "openrouter-test-key"
+    }
+  }
   const displayed: string[] = []
   session.subscribe((event) => {
     if (
@@ -224,6 +261,9 @@ export async function setup(options: {
     faux,
     calls,
     payloads,
+    requests,
+    authProviders,
+    notifications,
     skillPaths,
     modelRuntime,
     loader,

@@ -20,6 +20,12 @@ test("Jev recommends a standard read without loading its body; successful read r
   try {
     await h.session.prompt("/alpha investigate")
     expect(h.payloads).toHaveLength(1)
+    expect(h.authProviders).toEqual([])
+    expect(h.requests[0]!.url).toBe("https://api.typesafe.ai/v1/systemone")
+    expect(h.requests[0]!.init?.headers).toEqual({
+      Authorization: "Bearer test-key",
+      "Content-Type": "application/json",
+    })
     expect(bodyCount(h.calls[0]!, "alpha")).toBe(1)
     expect(bodyCount(h.calls[0]!, "beta")).toBe(0)
     expect(h.calls[0]!.messages.map(text).join("\n")).toContain(`read`)
@@ -46,6 +52,111 @@ test("Jev recommends a standard read without loading its body; successful read r
       { role: "user", text: "/alpha investigate" },
     ])
     expect(JSON.stringify(h.payloads)).not.toContain("SKILL_BODY")
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("OpenRouter resolves Pi provider auth only for the candidate batch", async () => {
+  const h = await setup({
+    jev: true,
+    jevProvider: "openrouter",
+    resolveOpenRouterKey: async () => "OPENROUTER_SYNTHETIC_KEY",
+    responses: [fauxAssistantMessage("done")],
+  })
+  try {
+    await h.session.prompt("investigate")
+    expect(h.authProviders).toEqual(["openrouter"])
+    expect(h.requests).toHaveLength(1)
+    expect(h.requests[0]!.url).toBe("https://openrouter.ai/api/v1/systemone")
+    expect(h.requests[0]!.init?.headers).toEqual({
+      Authorization: "Bearer OPENROUTER_SYNTHETIC_KEY",
+      "Content-Type": "application/json",
+    })
+    expect(JSON.stringify(h.payloads)).not.toContain("OPENROUTER_SYNTHETIC_KEY")
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("OpenRouter never falls back to the TypeSafe environment key", async () => {
+  const h = await setup({
+    jev: true,
+    jevProvider: "openrouter",
+    resolveOpenRouterKey: async () => undefined,
+    responses: [fauxAssistantMessage("done")],
+  })
+  try {
+    await h.session.prompt("investigate")
+    expect(h.authProviders).toEqual(["openrouter"])
+    expect(h.requests).toEqual([])
+    expect(h.notifications).toContain(
+      "inline-skills: Jev selection skipped (openrouter credentials unavailable)",
+    )
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test.each([
+  ["disabled", { jev: false }, "investigate"],
+  ["child session", { jev: true, child: true }, "investigate"],
+  ["no candidates", { jev: true }, "/alpha /beta /plan explicit"],
+  ["zero maxSkills", { jev: true, jevMaxSkills: 0 }, "investigate"],
+] as const)(
+  "%s does not resolve OpenRouter credentials or send Jev HTTP",
+  async (_name, setupOptions, prompt) => {
+    const h = await setup({
+      ...setupOptions,
+      jevProvider: "openrouter",
+      responses: [fauxAssistantMessage("done")],
+    })
+    try {
+      await h.session.prompt(prompt)
+      expect(h.authProviders).toEqual([])
+      expect(h.requests).toEqual([])
+    } finally {
+      h.session.dispose()
+    }
+  },
+)
+
+test("a completed batch does not resolve credentials again", async () => {
+  const h = await setup({
+    jev: true,
+    jevProvider: "openrouter",
+    responses: [fauxAssistantMessage("done")],
+  })
+  try {
+    await h.session.prompt("investigate")
+    expect(h.authProviders).toEqual(["openrouter"])
+    await h.session.extensionRunner.emitContext(
+      h.session.sessionManager.buildSessionProjection().messages,
+    )
+    expect(h.authProviders).toEqual(["openrouter"])
+    expect(h.requests).toHaveLength(1)
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("provider retry reuses one pending credential resolution and Jev decision", async () => {
+  const h = await setup({
+    jev: true,
+    jevProvider: "openrouter",
+    settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+    responses: [
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "rate limit exceeded",
+      }),
+      fauxAssistantMessage("recovered"),
+    ],
+  })
+  try {
+    await h.session.prompt("investigate")
+    expect(h.authProviders).toEqual(["openrouter"])
+    expect(h.requests).toHaveLength(1)
   } finally {
     h.session.dispose()
   }

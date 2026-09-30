@@ -4,7 +4,7 @@ This is an independently maintained fork of [Tifan Dwi Avianto's `pi-inline-skil
 
 The main changes from upstream are:
 
-- Optional Jev skill recommendations in the main session, loaded through Pi's standard `read` tool rather than automatic body insertion.
+- Optional Jev skill recommendations through TypeSafe or OpenRouter in the main session, loaded through Pi's standard `read` tool rather than automatic body insertion. OpenRouter uses Pi's standard provider authentication.
 - Bounded, sanitized selection context, explicit-only skill exclusions, and child-session detection shared with the [pi-subagents fork](https://github.com/ryonakae/pi-subagents/tree/feat/jev-routing).
 - Manual skill loading tied to the input Pi actually consumes, preventing failed or cancelled inputs from leaking skill bodies into later requests. Existing `/skill-name` completion and loaded-skill tracking remain available.
 
@@ -48,6 +48,7 @@ Automatic selection is off by default. Create the global configuration at `~/.pi
 {
   "jev": {
     "enabled": true,
+    "provider": "typesafe",
     "model": "jev-1.13.0",
     "timeoutMs": 5000,
     "minRelevance": 0.85,
@@ -67,16 +68,46 @@ Automatic selection is off by default. Create the global configuration at `~/.pi
 }
 ```
 
-Set `TYPESAFE_API_KEY` in the environment that starts Pi. Reload Pi resources with `/reload`, or start a new session, after changing the configuration.
+`jev.provider` accepts `"typesafe"` (the default) or `"openrouter"`. The provider fixes the endpoint and the model used when `jev.model` is omitted:
 
-For each consumed batch of user messages, the extension sends at most one POST to `https://api.typesafe.ai/v1/systemone`. Provider retries reuse the decision, including failures and no-match results. Queuing an input alone does not send it. The request contains:
+| Provider     | Endpoint                                 | Default model       | Authentication                 |
+| ------------ | ---------------------------------------- | ------------------- | ------------------------------ |
+| `typesafe`   | `https://api.typesafe.ai/v1/systemone`   | `jev-1.13.0`        | `TYPESAFE_API_KEY`             |
+| `openrouter` | `https://openrouter.ai/api/v1/systemone` | `typesafe/jev-1.13` | Pi's OpenRouter authentication |
+
+An explicit `jev.model` is preserved when changing providers. Unknown providers disable Jev as an invalid configuration; the extension never falls back to another provider.
+
+For TypeSafe, set `TYPESAFE_API_KEY` in the environment that starts Pi. For OpenRouter, run `/login openrouter` in Pi or set `OPENROUTER_API_KEY` before starting Pi. Pi resolves OpenRouter credentials using its standard priority: a runtime API key, a saved credential, `models.json`, then the environment. A saved credential therefore takes priority over `OPENROUTER_API_KEY`. The extension does not read or write `auth.json` itself.
+
+For example, an OpenRouter configuration can omit the provider-default model:
+
+```json
+{
+  "jev": {
+    "enabled": true,
+    "provider": "openrouter",
+    "timeoutMs": 5000,
+    "minRelevance": 0.85,
+    "maxRequestBytes": 65536,
+    "maxSkills": 3,
+    "historyMessages": 6,
+    "historyChars": 12000
+  }
+}
+```
+
+Reload Pi resources with `/reload`, or start a new session, after changing the configuration.
+
+For each consumed batch of user messages, the extension resolves credentials only after finding candidates, then sends at most one POST to the configured provider endpoint. Provider retries reuse the decision, including pending authentication, failures, and no-match results. Queuing an input alone does not send it. Disabled Jev, child sessions, batches without candidates, zero `maxSkills`, and completed batches do not resolve OpenRouter credentials. The request contains:
 
 - the consumed request text after Pi's skill and template expansion, including user messages from other extensions;
 - up to `historyMessages` user and assistant text messages including the current batch, bounded by `historyChars`, without duplicating the current messages;
 - candidate skill names and descriptions;
 - explicitly requested and already loaded skill names.
 
-It excludes tool results, thinking blocks, images, expanded skill contents, and custom messages. It removes all skill blocks from both current and historical text; malformed or unclosed blocks cause the whole containing text to be omitted. This does not identify secrets quoted in arbitrary prose. It sends the API key only in the `Authorization` header. Diagnostics contain skill names, Noul scores, latency, truncation state, and failure categories; they do not contain the key, conversation text, input text, or API error bodies.
+It excludes tool results, thinking blocks, images, expanded skill contents, and custom messages. It removes all skill blocks from both current and historical text; malformed or unclosed blocks cause the whole containing text to be omitted. This does not identify secrets quoted in arbitrary prose. It sends the API key only in the `Authorization` header. Diagnostics contain skill names, Noul scores, latency, truncation state, and failure categories; they do not contain the key, conversation text, input text, authentication errors, or API error bodies.
+
+`timeoutMs` covers the System One HTTP request and response-body read. OpenRouter credential resolution happens before that timeout and follows Pi's standard behavior. In particular, a saved `!command` credential runs synchronously with Pi's own timeout of up to 10 seconds and is cached for the process lifetime, so a `timeoutMs` of 5000 does not impose a five-second limit on authentication plus HTTP combined. If the request is aborted or its session or input batch changes while authentication is pending, the extension does not start the HTTP request afterward.
 
 Each candidate receives a Noul score in the same request. Jev recommends skills at or above `minRelevance` in descending score order, up to `maxSkills`. The extension adds their names and file paths to a request-local instruction to use `read`; it does not insert their bodies, invent tool results, or mark them loaded. The model may decline to read them. Successful reads remove the corresponding instructions. New consumed inputs, aborts, run completion, and branch/session changes invalidate old recommendations. These instructions are not saved in session history.
 
@@ -89,7 +120,7 @@ Automatic selection requires the read-only `globalThis[Symbol.for("pi-subagents:
 - Manual insertion, native expansion, and successful `read` results establish loaded state on the active branch. The extension suppresses repeated manual insertion and recommendations for those skills, including after reload and compaction. Recommendations alone and failed reads do not establish loaded state. Pi still controls native expansion.
 - `excludedSkills` and `disable-model-invocation: true` affect automatic selection only. Explicit `/skill-name` tokens still load those skills.
 - Pi dispatches registered commands before the extension handles an accepted agent prompt. Matching slash tokens in the final expanded request are manual skill requests, even when a template produced a command-like prefix.
-- Jev errors, timeouts, invalid responses, and missing credentials skip automatic selection without discarding explicit skills.
+- Jev errors, timeouts, invalid responses, and missing or failed credentials skip automatic selection without discarding explicit skills. Credentials are never borrowed from the other provider.
 - All-at-once queues process the whole consumed user batch. Request-local manual injection and saved-message deduplication are separate, so retries retain the body without duplicate display or storage.
 - Pi saves queued manual bodies already supplied to a request even when that turn errors or aborts. Unconsumed or cleared inputs have no pending bodies to leak into later requests.
 

@@ -30,6 +30,7 @@ test("the approved global Jev schema parses all adjustable limits", () => {
   ).toEqual({
     jev: {
       enabled: true,
+      provider: "typesafe",
       model: "jev-1.13.0",
       timeoutMs: 5_000,
       minRelevance: 0.85,
@@ -41,6 +42,40 @@ test("the approved global Jev schema parses all adjustable limits", () => {
     },
   })
 })
+
+test.each([
+  [undefined, "typesafe", "jev-1.13.0"],
+  ["typesafe", "typesafe", "jev-1.13.0"],
+  ["openrouter", "openrouter", "typesafe/jev-1.13"],
+] as const)(
+  "provider %s selects its default model",
+  (configuredProvider, provider, model) => {
+    expect(
+      parseSettings({
+        jev:
+          configuredProvider === undefined
+            ? {}
+            : { provider: configuredProvider },
+      }).jev,
+    ).toMatchObject({ provider, model })
+  },
+)
+
+test("an explicit model is preserved for either provider", () => {
+  expect(
+    parseSettings({ jev: { provider: "openrouter", model: "custom/model" } })
+      .jev.model,
+  ).toBe("custom/model")
+})
+
+test.each([[null], [false], [1], [{}], [[]], ["other"]] as const)(
+  "invalid provider %p is rejected",
+  (provider) => {
+    expect(() => parseSettings({ jev: { provider } })).toThrow(
+      "jev.provider is invalid",
+    )
+  },
+)
 
 test("missing config keeps network selection off", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-inline-config-"))

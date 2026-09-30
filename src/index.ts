@@ -566,11 +566,6 @@ export default function (pi: ExtensionAPI): void {
         `inline-skills: pi-subagents child context ${childContext.reason}; Jev selection disabled`,
         "warning",
       )
-    } else if (automaticSelectionEnabled && !process.env["TYPESAFE_API_KEY"]) {
-      ctx.ui.notify(
-        "inline-skills: TYPESAFE_API_KEY is missing; Jev selection disabled",
-        "warning",
-      )
     }
     ctx.ui.addAutocompleteProvider((current) =>
       createSlashSkillAutocompleteProvider(pi, current),
@@ -664,7 +659,6 @@ export default function (pi: ExtensionAPI): void {
       messages.push({ ...message, role: "custom", timestamp: Date.now() })
     }
 
-    const apiKey = process.env["TYPESAFE_API_KEY"]
     const conversation = buildConversationState(batch.history, texts, {
       maxMessages: settings.jev.historyMessages,
       maxChars: settings.jev.historyChars,
@@ -672,7 +666,6 @@ export default function (pi: ExtensionAPI): void {
     const currentInput = conversation.currentInput
     if (
       !automaticSelectionEnabled ||
-      !apiKey ||
       !currentInput ||
       settings.jev.maxSkills === 0 ||
       completedBatches.has(batch.key)
@@ -703,6 +696,18 @@ export default function (pi: ExtensionAPI): void {
         (async (): Promise<SkillInfo[]> => {
           if (candidates.length === 0) return []
           try {
+            const apiKey =
+              settings.jev.provider === "openrouter"
+                ? await ctx.modelRegistry.getApiKeyForProvider("openrouter")
+                : process.env["TYPESAFE_API_KEY"]
+            if (!valid()) return []
+            if (!apiKey) {
+              ctx.ui.notify(
+                `inline-skills: Jev selection skipped (${settings.jev.provider} credentials unavailable)`,
+                "warning",
+              )
+              return []
+            }
             const selection = await selectSkills({
               settings: settings.jev,
               apiKey,

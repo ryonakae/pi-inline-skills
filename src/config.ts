@@ -2,8 +2,11 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { getAgentDir } from "@earendil-works/pi-coding-agent"
 
+export type JevProvider = "typesafe" | "openrouter"
+
 export type JevSettings = {
   enabled: boolean
+  provider: JevProvider
   model: string
   timeoutMs: number
   minRelevance: number
@@ -26,6 +29,7 @@ export type SettingsResult = {
 export const DEFAULT_SETTINGS: InlineSkillsSettings = Object.freeze({
   jev: Object.freeze({
     enabled: false,
+    provider: "typesafe",
     model: "jev-1.13.0",
     timeoutMs: 5_000,
     minRelevance: 0.85,
@@ -68,7 +72,16 @@ export function parseSettings(value: unknown): InlineSkillsSettings {
 
   const enabled = rawJev["enabled"] ?? DEFAULT_SETTINGS.jev.enabled
   if (typeof enabled !== "boolean") throw new Error("jev.enabled is invalid")
-  const model = rawJev["model"] ?? DEFAULT_SETTINGS.jev.model
+  const provider =
+    rawJev["provider"] === undefined
+      ? DEFAULT_SETTINGS.jev.provider
+      : rawJev["provider"]
+  if (provider !== "typesafe" && provider !== "openrouter") {
+    throw new Error("jev.provider is invalid")
+  }
+  const model =
+    rawJev["model"] ??
+    (provider === "openrouter" ? "typesafe/jev-1.13" : "jev-1.13.0")
   if (typeof model !== "string" || model.trim().length === 0) {
     throw new Error("jev.model is invalid")
   }
@@ -86,6 +99,7 @@ export function parseSettings(value: unknown): InlineSkillsSettings {
   return {
     jev: {
       enabled,
+      provider,
       model,
       timeoutMs: numberSetting(
         rawJev["timeoutMs"],
