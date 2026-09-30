@@ -86,6 +86,12 @@ type SkillInjection = {
   skills: ParsedSkillBlock[]
 }
 
+type BatchNotification = {
+  manualLoaded: string[]
+  manualAlreadyLoaded: string[]
+  automaticLoaded: string[]
+}
+
 const LOADED_SKILL_ENTRY_TYPE = "loaded-skill"
 const INLINE_SKILL_MESSAGE_TYPE = "inline-skill"
 const MAX_SUGGESTIONS = 30
@@ -489,6 +495,8 @@ export default function (pi: ExtensionAPI): void {
   const manualPersistenceScheduled = new Set<string>()
   const automaticPersistenceScheduled = new Set<string>()
   const decisions = new Map<string, Promise<SkillInjection | undefined>>()
+  const batchNotifications = new Map<string, BatchNotification>()
+  const notifiedBatches = new Set<string>()
   const pendingSuccessfulReads = new Map<
     string,
     { name: string; toolCallId: string }
@@ -496,6 +504,7 @@ export default function (pi: ExtensionAPI): void {
   const completedBatches = new Set<string>()
   let generation = 0
   let activeBatch: string | undefined
+  let preflightManualLoaded: string[] = []
 
   const invalidateRecommendations = (): void => {
     generation += 1
@@ -507,7 +516,30 @@ export default function (pi: ExtensionAPI): void {
     automaticPersistenceScheduled.clear()
     pendingSuccessfulReads.clear()
     decisions.clear()
+    preflightManualLoaded = []
+    batchNotifications.clear()
+    notifiedBatches.clear()
     completedBatches.clear()
+  }
+
+  const notifyBatch = (key: string, ctx: ExtensionContext): void => {
+    if (notifiedBatches.has(key)) return
+    const notification = batchNotifications.get(key)
+    if (!notification) return
+    const rows = [
+      notification.manualLoaded.length > 0
+        ? `${notification.manualLoaded.length > 1 ? "Skills" : "Skill"} loaded: ${notification.manualLoaded.join(", ")}`
+        : undefined,
+      notification.manualAlreadyLoaded.length > 0
+        ? `${notification.manualAlreadyLoaded.length > 1 ? "Skills" : "Skill"} already loaded: ${notification.manualAlreadyLoaded.join(", ")}`
+        : undefined,
+      notification.automaticLoaded.length > 0
+        ? `${notification.automaticLoaded.length > 1 ? "Skills" : "Skill"} automatically loaded by Jev: ${notification.automaticLoaded.join(", ")}`
+        : undefined,
+    ].filter((row): row is string => row !== undefined)
+    if (rows.length === 0) return
+    notifiedBatches.add(key)
+    ctx.ui.notify(rows.join("\n"), "info")
   }
 
   const explicitSkills = (text: string): SkillInfo[] => {
@@ -578,6 +610,10 @@ export default function (pi: ExtensionAPI): void {
       }
       ctx.ui.notify(`Loaded skills: ${names.join(", ")}`, "info")
     },
+  })
+
+  pi.on("input", () => {
+    preflightManualLoaded = []
   })
 
   pi.on("session_start", async (_event, ctx) => {
@@ -681,7 +717,35 @@ export default function (pi: ExtensionAPI): void {
       consumedInputBatch(ctx)?.key === batch.key
     const loadedSkills = effectiveLoadedSkills(pi, ctx)
     const texts = batch.users.map(({ message }) => textContent(message))
+    const requestedManual = texts
+      .flatMap(explicitSkills)
+      .filter(
+        (skill, index, skills) =>
+          skills.findIndex((other) => other.name === skill.name) === index,
+      )
     const injection = manualInjection(texts, ctx, loadedSkills)
+    const notification =
+      batchNotifications.get(batch.key) ??
+      ({
+        manualLoaded: [],
+        manualAlreadyLoaded: [],
+        automaticLoaded: [],
+      } satisfies BatchNotification)
+    batchNotifications.set(batch.key, notification)
+    notification.manualLoaded =
+      preflightManualLoaded.length > 0
+        ? preflightManualLoaded.filter((name) =>
+            requestedManual.some((skill) => skill.name === name),
+          )
+        : (injection?.names ?? [])
+    notification.manualAlreadyLoaded = requestedManual
+      .filter(
+        (skill) =>
+          loadedSkills.has(skill.name) &&
+          !notification.manualLoaded.includes(skill.name),
+      )
+      .map((skill) => skill.name)
+    preflightManualLoaded = []
     const messages = [...event.messages]
     if (injection) {
       const message = {
@@ -713,8 +777,10 @@ export default function (pi: ExtensionAPI): void {
       !currentInput ||
       settings.jev.maxSkills === 0 ||
       completedBatches.has(batch.key)
-    )
+    ) {
+      notifyBatch(batch.key, ctx)
       return { messages }
+    }
     if (!decisions.has(batch.key)) {
       const explicitNames = [
         ...new Set(
@@ -796,12 +862,19 @@ export default function (pi: ExtensionAPI): void {
       )
     }
     const decision = await decisions.get(batch.key)!
-    if (!valid() || !decision) return { messages }
+    if (!valid()) return { messages }
+    if (!decision) {
+      notifyBatch(batch.key, ctx)
+      return { messages }
+    }
     const currentLoaded = effectiveLoadedSkills(pi, ctx)
     const remaining = decision.skills.filter(
       (skill) => !currentLoaded.has(skill.name),
     )
-    if (remaining.length === 0) return { messages }
+    if (remaining.length === 0) {
+      notifyBatch(batch.key, ctx)
+      return { messages }
+    }
     const automaticInjection = renderSkillInjection(remaining)
     const message = {
       customType: INLINE_SKILL_MESSAGE_TYPE,
@@ -817,12 +890,10 @@ export default function (pi: ExtensionAPI): void {
     if (!automaticPersistenceScheduled.has(batch.key)) {
       automaticPersistenceScheduled.add(batch.key)
       pi.sendMessage(message, { triggerTurn: false })
-      ctx.ui.notify(
-        `inline-skills: loaded ${automaticInjection.names.join(", ")} by Jev`,
-        "info",
-      )
+      notification.automaticLoaded = automaticInjection.names
     }
     messages.push({ ...message, role: "custom", timestamp: Date.now() })
+    notifyBatch(batch.key, ctx)
     return { messages }
   })
 
@@ -831,6 +902,7 @@ export default function (pi: ExtensionAPI): void {
     for (const name of nativeSkillNames(event.prompt)) loadedSkills.add(name)
     const injection = manualInjection([event.prompt], ctx, loadedSkills)
     if (!injection) return
+    preflightManualLoaded = injection.names
     return {
       message: {
         customType: INLINE_SKILL_MESSAGE_TYPE,

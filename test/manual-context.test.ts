@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { rmSync, writeFileSync } from "node:fs"
-import { fauxAssistantMessage } from "@earendil-works/pi-ai"
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai"
 import { bodyCount, gate, setup, text, waitFor } from "./harness.ts"
 
 test("normal manual input is saved and displayed before the model responds", async () => {
@@ -16,6 +16,7 @@ test("normal manual input is saved and displayed before the model responds", asy
   try {
     const run = h.session.prompt("/alpha normal")
     await waitFor(() => h.calls.length === 1)
+    expect(h.notifications).toEqual(["Skill loaded: alpha"])
     expect(bodyCount(h.calls[0]!, "alpha")).toBe(1)
     expect(h.entries()).toHaveLength(1)
     expect(h.displayed).toHaveLength(1)
@@ -23,6 +24,38 @@ test("normal manual input is saved and displayed before the model responds", asy
     await run
   } finally {
     hold.release()
+    h.session.dispose()
+  }
+})
+
+test("repeated explicit invocations report the effective skill as already loaded", async () => {
+  const h = await setup({
+    responses: [fauxAssistantMessage("first"), fauxAssistantMessage("second")],
+  })
+  try {
+    await h.session.prompt("/alpha first")
+    await h.session.prompt("/alpha second")
+    expect(h.notifications).toEqual([
+      "Skill loaded: alpha",
+      "Skill already loaded: alpha",
+    ])
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("manual notification rows pluralize when they contain multiple names", async () => {
+  const h = await setup({
+    responses: [fauxAssistantMessage("first"), fauxAssistantMessage("second")],
+  })
+  try {
+    await h.session.prompt("/alpha /beta first")
+    await h.session.prompt("/alpha /beta second")
+    expect(h.notifications).toEqual([
+      "Skills loaded: alpha, beta",
+      "Skills already loaded: alpha, beta",
+    ])
+  } finally {
     h.session.dispose()
   }
 })
@@ -126,6 +159,7 @@ test("all-at-once queued users receive both bodies before the response, with dis
     expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
     expect(h.displayed).toHaveLength(0)
     expect(h.entries()).toHaveLength(0)
+    expect(h.notifications).toEqual(["Skills loaded: alpha, beta"])
     queued.release()
     await run
     expect(h.displayed).toHaveLength(1)
@@ -133,6 +167,28 @@ test("all-at-once queued users receive both bodies before the response, with dis
   } finally {
     hold.release()
     queued.release()
+    h.session.dispose()
+  }
+})
+
+test("tool turns do not repeat a manual notification for the consumed batch", async () => {
+  let path = ""
+  const h = await setup({
+    tools: true,
+    responses: [
+      () =>
+        fauxAssistantMessage(fauxToolCall("read", { path }), {
+          stopReason: "toolUse",
+        }),
+      fauxAssistantMessage("done"),
+    ],
+  })
+  path = h.skillPaths["alpha"]!
+  try {
+    await h.session.prompt("/alpha inspect")
+    expect(h.calls).toHaveLength(2)
+    expect(h.notifications).toEqual(["Skill loaded: alpha"])
+  } finally {
     h.session.dispose()
   }
 })
@@ -171,6 +227,7 @@ test("a retry uses exactly the queued body scheduled for persistence even if its
     )
     expect(h.entries()).toHaveLength(1)
     expect(JSON.stringify(h.entries())).toContain("ALPHA_SKILL_BODY")
+    expect(h.notifications).toEqual(["Skill loaded: alpha"])
   } finally {
     hold.release()
     h.session.dispose()

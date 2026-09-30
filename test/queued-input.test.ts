@@ -61,8 +61,10 @@ test.each(["steer", "followUp"] as const)(
         false,
       ])
       expect(h.notifications).toEqual([
-        "inline-skills: loaded alpha by Jev",
-        "inline-skills: loaded beta by Jev",
+        "Skill automatically loaded by Jev: alpha",
+        ["Skill loaded: plan", "Skill automatically loaded by Jev: beta"].join(
+          "\n",
+        ),
       ])
       expect(settlements).toBe(1)
     } finally {

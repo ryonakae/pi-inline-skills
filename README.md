@@ -102,11 +102,25 @@ It excludes tool results, thinking blocks, images, expanded skill contents, and 
 
 `timeoutMs` covers the System One HTTP request and response-body read. OpenRouter credential resolution happens before that timeout and follows Pi's standard behavior. In particular, a saved `!command` credential runs synchronously with Pi's own timeout of up to 10 seconds and is cached for the process lifetime, so a `timeoutMs` of 5000 does not impose a five-second limit on authentication plus HTTP combined. If the request is aborted or its session or input batch changes while authentication is pending, the extension does not start the HTTP request afterward.
 
-Each candidate receives a Noul score in the same request. The extension loads skills at or above `minRelevance` in descending score order, up to `maxSkills`. It reads each selected `SKILL.md`, inserts the existing inline skill block into that model request, and queues the same content as an `inline-skill` custom message with `display: false`. It does not invent tool calls or tool results. Before the model call, one notification reports the names whose skill bodies are ready in the model input, for example `inline-skills: loaded use-zellij, worktrunk by Jev`. This notification remains visible if the request subsequently fails or is aborted; it does not confirm model processing or session persistence. Unreadable files produce an error notification; readable selections still load together. No match is silent. New consumed inputs, aborts, run completion, and branch/session changes invalidate stale selections. Provider retries reuse both the Jev decision and the already built body without duplicate storage or notification.
+Each candidate receives a Noul score in the same request. The extension loads skills at or above `minRelevance` in descending score order, up to `maxSkills`. It reads each selected `SKILL.md`, inserts the existing inline skill block into that model request, and queues the same content as an `inline-skill` custom message with `display: false`. It does not invent tool calls or tool results. Automatic loads appear in the combined notification described below. Unreadable files produce an error notification; readable selections still load together. No automatic match adds no notification line. New consumed inputs, aborts, run completion, and branch/session changes invalidate stale selections. Provider retries reuse both the Jev decision and the already built body without duplicate storage or notification.
 
 The extension skips requests exceeding `maxRequestBytes` rather than silently removing candidates. With Jev disabled, it makes no Jev HTTP requests.
 
 Automatic selection requires the read-only `globalThis[Symbol.for("pi-subagents:child-context")]` version 1 contract supplied by a compatible `pi-subagents`. Missing or incompatible contracts disable only automatic selection. Child sessions never call Jev. Explicit inline skills, Pi's native `/skill:name` command, catalog access, completion, and `/loaded-skills` remain available.
+
+## Loading notifications
+
+Before the model call, the extension combines inline manual and automatic results into one notification per consumed input batch, with up to three lines:
+
+```text
+Skill loaded: A
+Skills already loaded: B, C
+Skill automatically loaded by Jev: D
+```
+
+Only applicable lines appear, in that order. Each line uses `Skill` for one name or `Skills` for multiple comma-separated names. Explicit `/skill-name` requests report either a new load or an already-loaded body; Jev selections use the automatic line. A body removed by compaction or a context edit counts as a new load when requested again. Retries and subsequent tool turns do not repeat the notification. All-at-once queued inputs share one notification for their consumed batch.
+
+The notification means the skill bodies are ready in the model input, not that the model has processed them or that Pi has saved them. It remains visible if the request subsequently fails or is aborted. Read errors and Jev warnings remain separate notifications.
 
 ## Loading rules
 

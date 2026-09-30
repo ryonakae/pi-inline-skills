@@ -70,7 +70,10 @@ test("provider retry reuses the batch decision and delivers a queued body once p
     }
     expect(h.entries()).toHaveLength(2)
     expect(h.displayed).toHaveLength(1)
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual([
+      "Skill automatically loaded by Jev: beta",
+      "Skill loaded: alpha",
+    ])
   } finally {
     hold.release()
     h.session.dispose()

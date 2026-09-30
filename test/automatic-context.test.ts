@@ -10,7 +10,12 @@ test("Jev notifies before the first model call and persists the hidden body afte
     jev: true,
     responses: [
       async () => {
-        expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+        expect(h.notifications).toEqual([
+          [
+            "Skill loaded: alpha",
+            "Skill automatically loaded by Jev: beta",
+          ].join("\n"),
+        ])
         await response.promise
         return fauxAssistantMessage("done")
       },
@@ -32,7 +37,11 @@ test("Jev notifies before the first model call and persists the hidden body afte
       "<skill_read_instructions>",
     )
     expect(h.entries()).toHaveLength(1)
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual([
+      ["Skill loaded: alpha", "Skill automatically loaded by Jev: beta"].join(
+        "\n",
+      ),
+    ])
 
     response.release()
     await run
@@ -40,7 +49,11 @@ test("Jev notifies before the first model call and persists the hidden body afte
     expect(h.entries().map((entry) => entry.display)).toEqual([true, false])
     expect(h.displayed).toHaveLength(1)
     expect(h.entries()[1]!.details).toMatchObject({ source: "jev" })
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual([
+      ["Skill loaded: alpha", "Skill automatically loaded by Jev: beta"].join(
+        "\n",
+      ),
+    ])
     expect(
       [
         ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
@@ -52,6 +65,46 @@ test("Jev notifies before the first model call and persists the hidden body afte
     expect(JSON.stringify(h.payloads)).not.toContain("SKILL_BODY")
   } finally {
     response.release()
+    h.session.dispose()
+  }
+})
+
+test("manual and automatic outcomes share one ordered notification per input batch", async () => {
+  const h = await setup({
+    jev: true,
+    fetch: async (payload) =>
+      Response.json({
+        answers: Object.fromEntries(
+          Object.entries(payload.questions).map(([key, question]) => [
+            key,
+            {
+              type: "noul",
+              noul:
+                payload.state.currentInput.includes("investigate") &&
+                question.instructions.includes('"beta"')
+                  ? 0.99
+                  : 0.1,
+            },
+          ]),
+        ),
+      }),
+    responses: [fauxAssistantMessage("first"), fauxAssistantMessage("second")],
+  })
+  try {
+    await h.session.prompt("/alpha seed")
+    await h.session.prompt("/alpha /plan investigate")
+    expect(bodyCount(h.calls[1]!, "alpha")).toBe(1)
+    expect(bodyCount(h.calls[1]!, "plan")).toBe(1)
+    expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
+    expect(h.notifications).toEqual([
+      "Skill loaded: alpha",
+      [
+        "Skill loaded: plan",
+        "Skill already loaded: alpha",
+        "Skill automatically loaded by Jev: beta",
+      ].join("\n"),
+    ])
+  } finally {
     h.session.dispose()
   }
 })
@@ -192,7 +245,9 @@ test("provider retry reuses the constructed automatic body without repeating the
     settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
     responses: [
       () => {
-        expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+        expect(h.notifications).toEqual([
+          "Skill automatically loaded by Jev: beta",
+        ])
         writeFileSync(betaPath, "CHANGED_SKILL_BODY")
         return fauxAssistantMessage("", {
           stopReason: "error",
@@ -200,7 +255,9 @@ test("provider retry reuses the constructed automatic body without repeating the
         })
       },
       () => {
-        expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+        expect(h.notifications).toEqual([
+          "Skill automatically loaded by Jev: beta",
+        ])
         return fauxAssistantMessage("recovered")
       },
     ],
@@ -216,7 +273,7 @@ test("provider retry reuses the constructed automatic body without repeating the
       )
     }
     expect(h.entries()).toHaveLength(1)
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual(["Skill automatically loaded by Jev: beta"])
   } finally {
     h.session.dispose()
   }
@@ -324,7 +381,7 @@ test("automatic bodies preserve descending Jev relevance order", async () => {
       source: "jev",
     })
     expect(h.notifications).toEqual([
-      "inline-skills: loaded beta, alpha by Jev",
+      "Skills automatically loaded by Jev: beta, alpha",
     ])
   } finally {
     h.session.dispose()
@@ -385,7 +442,7 @@ test("a continuation after a completed agent run does not duplicate its automati
     expect(bodyCount(h.calls[0]!, "beta")).toBe(1)
     expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
     expect(h.entries()).toHaveLength(1)
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual(["Skill automatically loaded by Jev: beta"])
   } finally {
     h.session.dispose()
   }
@@ -432,7 +489,7 @@ test("an unreadable automatic skill warns once and can be retried by the next re
     expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
     expect(h.notifications).toEqual([
       "inline-skills: failed to load beta",
-      "inline-skills: loaded beta by Jev",
+      "Skill automatically loaded by Jev: beta",
     ])
   } finally {
     h.session.dispose()
@@ -471,7 +528,7 @@ test("partial automatic load failure persists and notifies only successful skill
     })
     expect(h.notifications).toEqual([
       "inline-skills: failed to load beta",
-      "inline-skills: loaded alpha by Jev",
+      "Skill automatically loaded by Jev: alpha",
     ])
   } finally {
     h.session.dispose()
@@ -531,18 +588,21 @@ test("abort after automatic insertion preserves the body and the early notificat
     await waitFor(() => h.calls.length === 1)
     expect(bodyCount(h.calls[0]!, "beta")).toBe(1)
     expect(h.entries()).toHaveLength(0)
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual(["Skill automatically loaded by Jev: beta"])
     const aborting = h.session.abort()
     hold.release()
     await aborting
     await run
     expect(h.entries()).toHaveLength(1)
     expect(h.entries()[0]!.display).toBe(false)
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual(["Skill automatically loaded by Jev: beta"])
     await h.session.prompt("/beta continue")
     expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
     expect(h.entries()).toHaveLength(1)
-    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+    expect(h.notifications).toEqual([
+      "Skill automatically loaded by Jev: beta",
+      "Skill already loaded: beta",
+    ])
   } finally {
     hold.release()
     h.session.dispose()

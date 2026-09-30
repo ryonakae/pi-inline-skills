@@ -190,9 +190,33 @@ test("compaction keeps historical load records while allowing a missing manual b
     await h.session.prompt("/alpha again")
     expect(bodyCount(h.calls[2]!, "alpha")).toBe(1)
     expect(h.entries()).toHaveLength(2)
+    expect(h.notifications).toEqual([
+      "Skill loaded: alpha",
+      "Skill loaded: alpha",
+    ])
     expect([
       ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
     ]).toEqual(["alpha"])
+  } finally {
+    h.session.dispose()
+  }
+})
+
+test("context edit reports a removed manual body as newly loaded again", async () => {
+  const h = await setup({
+    responses: [fauxAssistantMessage("first"), fauxAssistantMessage("second")],
+  })
+  try {
+    await h.session.prompt("/alpha first")
+    h.session.sessionManager.appendContextEdit(h.entries()[0]!.id, {
+      content: "body removed",
+    })
+    await h.session.prompt("/alpha again")
+    expect(bodyCount(h.calls[1]!, "alpha")).toBe(1)
+    expect(h.notifications).toEqual([
+      "Skill loaded: alpha",
+      "Skill loaded: alpha",
+    ])
   } finally {
     h.session.dispose()
   }
@@ -228,8 +252,8 @@ test("compaction lets a missing automatic body be selected again without restori
     expect(bodyCount(h.calls[2]!, "beta")).toBe(1)
     expect(h.entries()).toHaveLength(2)
     expect(h.notifications).toEqual([
-      "inline-skills: loaded beta by Jev",
-      "inline-skills: loaded beta by Jev",
+      "Skill automatically loaded by Jev: beta",
+      "Skill automatically loaded by Jev: beta",
     ])
     expect([
       ...restoreLoadedSkillNames(h.session.sessionManager.getBranch()),
@@ -255,8 +279,8 @@ test("context edit lets a removed automatic body be selected again", async () =>
     expect(bodyCount(h.calls[1]!, "beta")).toBe(1)
     expect(h.entries()).toHaveLength(2)
     expect(h.notifications).toEqual([
-      "inline-skills: loaded beta by Jev",
-      "inline-skills: loaded beta by Jev",
+      "Skill automatically loaded by Jev: beta",
+      "Skill automatically loaded by Jev: beta",
     ])
   } finally {
     h.session.dispose()
