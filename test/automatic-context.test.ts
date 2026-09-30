@@ -4,12 +4,13 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai"
 import { restoreLoadedSkillNames } from "../src/loaded-skills.ts"
 import { bodyCount, gate, setup, text, waitFor } from "./harness.ts"
 
-test("Jev inserts a hidden body in the first request and notifies only after persistence", async () => {
+test("Jev notifies before the first model call and persists the hidden body afterward", async () => {
   const response = gate()
   const h = await setup({
     jev: true,
     responses: [
       async () => {
+        expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
         await response.promise
         return fauxAssistantMessage("done")
       },
@@ -31,7 +32,7 @@ test("Jev inserts a hidden body in the first request and notifies only after per
       "<skill_read_instructions>",
     )
     expect(h.entries()).toHaveLength(1)
-    expect(h.notifications).not.toContain("inline-skills: loaded beta by Jev")
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
 
     response.release()
     await run
@@ -184,20 +185,24 @@ test("provider retry reuses one pending credential resolution and Jev decision",
   }
 })
 
-test("provider retry reuses the constructed automatic body", async () => {
+test("provider retry reuses the constructed automatic body without repeating the early notification", async () => {
   let betaPath = ""
   const h = await setup({
     jev: true,
     settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
     responses: [
       () => {
+        expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
         writeFileSync(betaPath, "CHANGED_SKILL_BODY")
         return fauxAssistantMessage("", {
           stopReason: "error",
           errorMessage: "rate limit exceeded",
         })
       },
-      fauxAssistantMessage("recovered"),
+      () => {
+        expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
+        return fauxAssistantMessage("recovered")
+      },
     ],
   })
   betaPath = h.skillPaths["beta"]!
@@ -509,7 +514,7 @@ test("all-at-once users form one automatic batch; identical later input is a dis
   }
 })
 
-test("abort after automatic insertion preserves the body and notifies only its persisted load", async () => {
+test("abort after automatic insertion preserves the body and the early notification without duplicates", async () => {
   const hold = gate()
   const h = await setup({
     jev: true,
@@ -526,7 +531,7 @@ test("abort after automatic insertion preserves the body and notifies only its p
     await waitFor(() => h.calls.length === 1)
     expect(bodyCount(h.calls[0]!, "beta")).toBe(1)
     expect(h.entries()).toHaveLength(0)
-    expect(h.notifications).toEqual([])
+    expect(h.notifications).toEqual(["inline-skills: loaded beta by Jev"])
     const aborting = h.session.abort()
     hold.release()
     await aborting

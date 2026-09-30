@@ -488,10 +488,6 @@ export default function (pi: ExtensionAPI): void {
     !childContext.isChildSession
   const manualPersistenceScheduled = new Set<string>()
   const automaticPersistenceScheduled = new Set<string>()
-  const pendingAutomaticNotifications = new Map<
-    string,
-    { content: string; names: string[]; persistedCount: number }
-  >()
   const decisions = new Map<string, Promise<SkillInjection | undefined>>()
   const pendingSuccessfulReads = new Map<
     string,
@@ -509,30 +505,10 @@ export default function (pi: ExtensionAPI): void {
     invalidateRecommendations()
     manualPersistenceScheduled.clear()
     automaticPersistenceScheduled.clear()
-    pendingAutomaticNotifications.clear()
     pendingSuccessfulReads.clear()
     decisions.clear()
     completedBatches.clear()
   }
-
-  const automaticPersistenceCount = (
-    ctx: ExtensionContext,
-    pending: { content: string; names: string[] },
-  ): number =>
-    ctx.sessionManager.getBranch().filter((entry) => {
-      if (
-        entry.type !== "custom_message" ||
-        entry.customType !== INLINE_SKILL_MESSAGE_TYPE ||
-        entry.display !== false ||
-        entry.content !== pending.content
-      )
-        return false
-      const details = entry.details as InlineSkillMessageDetails | undefined
-      return (
-        details?.source === "jev" &&
-        JSON.stringify(details.names) === JSON.stringify(pending.names)
-      )
-    }).length
 
   const explicitSkills = (text: string): SkillInfo[] => {
     const request = skillRequestText(text)
@@ -684,14 +660,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("agent_before_settle", () => {
     for (const key of decisions.keys()) completedBatches.add(key)
   })
-  pi.on("agent_settled", (_event, ctx) => {
-    for (const pending of pendingAutomaticNotifications.values()) {
-      if (automaticPersistenceCount(ctx, pending) > pending.persistedCount)
-        ctx.ui.notify(
-          `inline-skills: loaded ${pending.names.join(", ")} by Jev`,
-          "info",
-        )
-    }
+  pi.on("agent_settled", () => {
     clearPending()
   })
 
@@ -847,12 +816,11 @@ export default function (pi: ExtensionAPI): void {
     if (!valid()) return { messages }
     if (!automaticPersistenceScheduled.has(batch.key)) {
       automaticPersistenceScheduled.add(batch.key)
-      pendingAutomaticNotifications.set(batch.key, {
-        content: automaticInjection.content,
-        names: automaticInjection.names,
-        persistedCount: automaticPersistenceCount(ctx, automaticInjection),
-      })
       pi.sendMessage(message, { triggerTurn: false })
+      ctx.ui.notify(
+        `inline-skills: loaded ${automaticInjection.names.join(", ")} by Jev`,
+        "info",
+      )
     }
     messages.push({ ...message, role: "custom", timestamp: Date.now() })
     return { messages }
