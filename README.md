@@ -5,7 +5,7 @@ This is an independently maintained fork of [Tifan Dwi Avianto's `pi-inline-skil
 The main changes from upstream are:
 
 - Optional Jev skill selection through TypeSafe or OpenRouter in the main session. Selected skill bodies are inserted into the current model request and saved as hidden session messages. OpenRouter uses Pi's standard provider authentication.
-- Bounded, sanitized selection context, explicit-only skill exclusions, and child-session detection shared with the [pi-subagents fork](https://github.com/ryonakae/pi-subagents).
+- Bounded, sanitized selection context, explicit-only skill exclusions, and child-session detection shared with the [pi-subagents fork](https://github.com/ryonakae/pi-subagents/tree/feat/jev-routing).
 - Manual skill loading tied to the input Pi actually consumes, preventing failed or cancelled inputs from leaking skill bodies into later requests. Existing `/skill-name` completion and loaded-skill tracking remain available.
 
 These changes are maintained for this fork's own use, rather than as an upstream pull request. Jev is off by default. See [UPSTREAM.md](UPSTREAM.md) for provenance and update guidance.
@@ -19,10 +19,10 @@ Type an inline `/skill-name` token to keep writing without replacing your prompt
 ## Install
 
 ```bash
-pi install git:github.com/ryonakae/pi-inline-skills@master
+pi install git:github.com/ryonakae/pi-inline-skills@feat/jev-routing
 ```
 
-The default `master` branch includes the Jev integration. Update with `pi update git:github.com/ryonakae/pi-inline-skills@master`. The extracted upstream history, provenance, and MIT license remain intact.
+The Jev integration is maintained on `feat/jev-routing`; `master` preserves the extracted upstream code with standalone provenance and licensing.
 
 The package requires Pi 0.87.1 or later and Node.js 22.19 or later.
 
