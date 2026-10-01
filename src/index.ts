@@ -8,22 +8,6 @@ import {
   type ParsedSkillBlock,
 } from "@earendil-works/pi-coding-agent"
 import { Box, Container, Text } from "@earendil-works/pi-tui"
-import { captureChildContext } from "./child-context.ts"
-import { loadSettings } from "./config.ts"
-import {
-  buildConversationState,
-  skillRequestText,
-  textContent,
-} from "./conversation.ts"
-import { consumedInputBatch } from "./input-batch.ts"
-import { JevSelectionError, selectSkills } from "./jev-client.ts"
-import { isAutomaticSkillCandidate } from "./skill-catalog.ts"
-import {
-  effectiveLoadedSkillNames,
-  nativeSkillNames,
-  restoreLoadedSkillNames,
-} from "./loaded-skills.ts"
-import { skillNameForSuccessfulRead } from "./read-tracking.ts"
 
 type AutocompleteItem = {
   value: string
@@ -74,22 +58,21 @@ type SkillInfo = {
   sourceInfo?: SkillCommand["sourceInfo"]
 }
 
+type LoadedSkillEntryData = {
+  name?: string
+  source?: "tool-result"
+}
+
 type InlineSkillMessageDetails = {
   names?: string[]
   skills?: ParsedSkillBlock[]
-  source?: "manual" | "jev"
 }
 
-type SkillInjection = {
-  content: string
-  names: string[]
-  skills: ParsedSkillBlock[]
-}
-
-type BatchNotification = {
-  manualLoaded: string[]
-  manualAlreadyLoaded: string[]
-  automaticLoaded: string[]
+type InlineSkillSessionEntry = {
+  type: string
+  customType?: string
+  data?: LoadedSkillEntryData
+  details?: InlineSkillMessageDetails
 }
 
 const LOADED_SKILL_ENTRY_TYPE = "loaded-skill"
@@ -172,6 +155,17 @@ function getSkills(pi: ExtensionAPI): SkillInfo[] {
     })
 }
 
+function hasStartingCommandConflict(pi: ExtensionAPI, text: string): boolean {
+  const match = text.match(/^\/([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-]|[:/])/i)
+  if (!match?.[1]) return false
+
+  const name = match[1].toLowerCase()
+  return (pi.getCommands() as SkillCommand[]).some(
+    (command) =>
+      command.source !== "skill" && command.name.toLowerCase() === name,
+  )
+}
+
 function normalizePath(path: string, cwd: string): string {
   const absolutePath = path.startsWith("/") ? path : resolve(cwd, path)
   try {
@@ -182,23 +176,56 @@ function normalizePath(path: string, cwd: string): string {
   return absolutePath
 }
 
-function restoreLoadedSkills(ctx: ExtensionContext): Set<string> {
-  return restoreLoadedSkillNames(ctx.sessionManager.getBranch())
+function getCurrentSkillPathMap(
+  pi: ExtensionAPI,
+  cwd: string,
+): Map<string, string> {
+  const skills = new Map<string, string>()
+
+  for (const command of pi.getCommands() as SkillCommand[]) {
+    if (command.source !== "skill") continue
+    if (!command.name?.startsWith("skill:")) continue
+    if (!command.sourceInfo?.path) continue
+
+    skills.set(
+      normalizePath(command.sourceInfo.path, cwd),
+      command.name.slice("skill:".length),
+    )
+  }
+
+  return skills
 }
 
-function effectiveLoadedSkills(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-): Set<string> {
-  return effectiveLoadedSkillNames(
-    ctx.sessionManager.buildSessionProjection(),
-    getSkills(pi).map((skill) => ({
-      name: skill.name,
-      path: skill.sourceInfo?.path,
-    })),
-    ctx.cwd,
-    ctx.sessionManager.getBranch(),
-  )
+function restoreLoadedSkills(ctx: ExtensionContext): Set<string> {
+  const loadedSkills = new Set<string>()
+
+  for (const entry of ctx.sessionManager.getBranch() as InlineSkillSessionEntry[]) {
+    if (
+      entry.type === "custom" &&
+      entry.customType === LOADED_SKILL_ENTRY_TYPE
+    ) {
+      const data = entry.data
+      if (
+        data?.source === "tool-result" &&
+        typeof data.name === "string" &&
+        data.name.trim()
+      ) {
+        loadedSkills.add(data.name)
+      }
+      continue
+    }
+
+    if (
+      entry.type === "custom_message" &&
+      entry.customType === INLINE_SKILL_MESSAGE_TYPE
+    ) {
+      for (const skill of entry.details?.skills ?? []) {
+        if (skill.name.trim()) loadedSkills.add(skill.name)
+      }
+    }
+  }
+
+  return loadedSkills
 }
 
 function stripFrontmatter(content: string): string {
@@ -243,36 +270,16 @@ function buildSkillBlock(
   }
 }
 
-function renderSkillInjection(skills: ParsedSkillBlock[]): SkillInjection {
-  const blocks = skills
-    .map(
-      (skill) =>
-        `<skill name="${escapeXmlAttribute(skill.name)}" location="${escapeXmlAttribute(skill.location)}">\n${skill.content}\n</skill>`,
-    )
-    .join("\n\n")
-  return {
-    content: `<inline_skills>\nThe following inline skill contents are already loaded. Do not load them again unless the user asks to inspect the source file.\n\n${blocks}\n</inline_skills>`,
-    names: skills.map((skill) => skill.name),
-    skills,
-  }
-}
-
-function buildSkillInjection(
+function buildInlineSkillContent(
   skills: SkillInfo[],
   cwd: string,
-  onError: (skill: SkillInfo, error: unknown) => void,
-): SkillInjection | undefined {
-  const built = skills.flatMap((skill) => {
-    try {
-      return [buildSkillBlock(skill, cwd)]
-    } catch (error) {
-      onError(skill, error)
-      return []
-    }
-  })
-  if (built.length === 0) return undefined
-
-  return renderSkillInjection(built.map((skill) => skill.skillBlock))
+): { content: string; skillBlocks: ParsedSkillBlock[] } {
+  const skillBlocks = skills.map((skill) => buildSkillBlock(skill, cwd))
+  const blocks = skillBlocks.map((skill) => skill.text).join("\n\n")
+  return {
+    content: `<inline_skills>\nThe following inline skill contents are already loaded. Do not load them again unless the user asks to inspect the source file.\n\n${blocks}\n</inline_skills>`,
+    skillBlocks: skillBlocks.map((skill) => skill.skillBlock),
+  }
 }
 
 function findInlineSkills(
@@ -485,83 +492,10 @@ function createSlashSkillAutocompleteProvider(
 }
 
 export default function (pi: ExtensionAPI): void {
-  const settingsResult = loadSettings()
-  const settings = settingsResult.settings
-  const childContext = captureChildContext()
-  const automaticSelectionEnabled =
-    settings.jev.enabled &&
-    childContext.supported &&
-    !childContext.isChildSession
-  const manualPersistenceScheduled = new Set<string>()
-  const automaticPersistenceScheduled = new Set<string>()
-  const decisions = new Map<string, Promise<SkillInjection | undefined>>()
-  const batchNotifications = new Map<string, BatchNotification>()
-  const notifiedBatches = new Set<string>()
-  const pendingSuccessfulReads = new Map<
-    string,
-    { name: string; toolCallId: string }
-  >()
-  const completedBatches = new Set<string>()
-  let generation = 0
-  let activeBatch: string | undefined
-  let preflightManualLoaded: string[] = []
-
-  const invalidateRecommendations = (): void => {
-    generation += 1
-    activeBatch = undefined
-  }
-  const clearPending = (): void => {
-    invalidateRecommendations()
-    manualPersistenceScheduled.clear()
-    automaticPersistenceScheduled.clear()
-    pendingSuccessfulReads.clear()
-    decisions.clear()
-    preflightManualLoaded = []
-    batchNotifications.clear()
-    notifiedBatches.clear()
-    completedBatches.clear()
-  }
-
-  const notifyBatch = (key: string, ctx: ExtensionContext): void => {
-    if (notifiedBatches.has(key)) return
-    const notification = batchNotifications.get(key)
-    if (!notification) return
-    const rows = [
-      notification.manualLoaded.length > 0
-        ? `${notification.manualLoaded.length > 1 ? "Skills" : "Skill"} loaded: ${notification.manualLoaded.join(", ")}`
-        : undefined,
-      notification.manualAlreadyLoaded.length > 0
-        ? `${notification.manualAlreadyLoaded.length > 1 ? "Skills" : "Skill"} already loaded: ${notification.manualAlreadyLoaded.join(", ")}`
-        : undefined,
-      notification.automaticLoaded.length > 0
-        ? `${notification.automaticLoaded.length > 1 ? "Skills" : "Skill"} automatically loaded by Jev: ${notification.automaticLoaded.join(", ")}`
-        : undefined,
-    ].filter((row): row is string => row !== undefined)
-    if (rows.length === 0) return
-    notifiedBatches.add(key)
-    ctx.ui.notify(rows.join("\n"), "info")
-  }
-
-  const explicitSkills = (text: string): SkillInfo[] => {
-    const request = skillRequestText(text)
-    return findInlineSkills(request, getSkills(pi))?.selected ?? []
-  }
-  const manualInjection = (
-    texts: string[],
-    ctx: ExtensionContext,
-    loadedSkills: Set<string>,
-  ): SkillInjection | undefined => {
-    const selected = texts
-      .flatMap(explicitSkills)
-      .filter(
-        (skill, index, skills) =>
-          !loadedSkills.has(skill.name) &&
-          skills.findIndex((other) => other.name === skill.name) === index,
-      )
-    return buildSkillInjection(selected, ctx.cwd, (skill) =>
-      ctx.ui.notify(`inline-skills: failed to load ${skill.name}`, "error"),
-    )
-  }
+  let pendingInlineSkillContent: string | undefined
+  let pendingInlineSkillNames: string[] = []
+  let pendingInlineSkillBlocks: ParsedSkillBlock[] = []
+  let loadedSkills = new Set<string>()
 
   installSlashAutocompleteTrigger()
 
@@ -612,307 +546,97 @@ export default function (pi: ExtensionAPI): void {
     },
   })
 
-  pi.on("input", () => {
-    preflightManualLoaded = []
-  })
-
   pi.on("session_start", async (_event, ctx) => {
-    clearPending()
-    if (settingsResult.error) {
-      ctx.ui.notify(
-        `inline-skills: invalid config; Jev selection disabled (${settingsResult.error})`,
-        "warning",
-      )
-    } else if (settings.jev.enabled && !childContext.supported) {
-      ctx.ui.notify(
-        `inline-skills: pi-subagents child context ${childContext.reason}; Jev selection disabled`,
-        "warning",
-      )
-    }
+    loadedSkills = restoreLoadedSkills(ctx)
     ctx.ui.addAutocompleteProvider((current) =>
       createSlashSkillAutocompleteProvider(pi, current),
     )
   })
 
-  pi.on("session_tree", async () => {
-    clearPending()
-  })
-
-  pi.on("session_before_switch", () => {
-    clearPending()
-  })
-
-  pi.on("session_before_fork", () => {
-    clearPending()
-  })
-
-  pi.on("session_shutdown", () => {
-    clearPending()
+  pi.on("session_tree", async (_event, ctx) => {
+    loadedSkills = restoreLoadedSkills(ctx)
   })
 
   pi.on("tool_result", async (event, ctx) => {
-    const skillName = skillNameForSuccessfulRead(
-      {
-        toolName: event.toolName,
-        isError: event.isError,
-        path: event.input["path"],
-      },
-      getSkills(pi).map((skill) => ({
-        name: skill.name,
-        path: skill.sourceInfo?.path,
-      })),
-      ctx.cwd,
-    )
-    if (!skillName) return
+    if (event.toolName !== "read" || event.isError) return
 
-    pendingSuccessfulReads.set(event.toolCallId, {
+    const input = event.input as { path?: unknown }
+    if (typeof input.path !== "string") return
+
+    const readPath = normalizePath(input.path, ctx.cwd)
+    const skillName = getCurrentSkillPathMap(pi, ctx.cwd).get(readPath)
+    if (!skillName || loadedSkills.has(skillName)) return
+
+    loadedSkills.add(skillName)
+    pi.appendEntry(LOADED_SKILL_ENTRY_TYPE, {
       name: skillName,
-      toolCallId: event.toolCallId,
+      source: "tool-result",
     })
   })
 
-  pi.on("turn_end", (event) => {
-    for (const result of event.toolResults) {
-      const read = pendingSuccessfulReads.get(result.toolCallId)
-      if (!read || result.toolName !== "read" || result.isError) continue
-      pi.appendEntry(LOADED_SKILL_ENTRY_TYPE, {
-        name: read.name,
-        source: "tool-result",
-        toolCallId: read.toolCallId,
-      })
-      pendingSuccessfulReads.delete(result.toolCallId)
+  pi.on("input", async (event, ctx) => {
+    pendingInlineSkillContent = undefined
+    pendingInlineSkillNames = []
+    pendingInlineSkillBlocks = []
+    loadedSkills = restoreLoadedSkills(ctx)
+    if (event.source === "extension" || !event.text.includes("/")) {
+      return { action: "continue" }
     }
-  })
+    if (hasStartingCommandConflict(pi, event.text)) {
+      return { action: "continue" }
+    }
 
-  pi.on("agent_end", (event) => {
-    const lastAssistant = event.messages.findLast(
-      (message) => message.role === "assistant",
+    const expanded = findInlineSkills(event.text, getSkills(pi))
+    if (!expanded) return { action: "continue" }
+
+    const skillsToInject = expanded.selected.filter(
+      (skill) => !loadedSkills.has(skill.name),
     )
-    // Error runs may retry before pre-settlement; keep their decision available until then.
-    if (activeBatch && lastAssistant?.stopReason !== "error")
-      completedBatches.add(activeBatch)
-    invalidateRecommendations()
-  })
-  pi.on("agent_before_settle", () => {
-    for (const key of decisions.keys()) completedBatches.add(key)
-  })
-  pi.on("agent_settled", () => {
-    clearPending()
-  })
 
-  pi.on("context", async (event, ctx) => {
-    const batch = consumedInputBatch(ctx)
-    if (!batch || ctx.isIdle() || ctx.signal?.aborted) return
-    if (activeBatch !== batch.key) {
-      invalidateRecommendations()
-      activeBatch = batch.key
-    }
-    const requestGeneration = generation
-    const signal = ctx.signal
-    const valid = (): boolean =>
-      !signal?.aborted &&
-      generation === requestGeneration &&
-      !ctx.isIdle() &&
-      activeBatch === batch.key &&
-      consumedInputBatch(ctx)?.key === batch.key
-    const loadedSkills = effectiveLoadedSkills(pi, ctx)
-    const texts = batch.users.map(({ message }) => textContent(message))
-    const requestedManual = texts
-      .flatMap(explicitSkills)
-      .filter(
-        (skill, index, skills) =>
-          skills.findIndex((other) => other.name === skill.name) === index,
-      )
-    const injection = manualInjection(texts, ctx, loadedSkills)
-    const notification =
-      batchNotifications.get(batch.key) ??
-      ({
-        manualLoaded: [],
-        manualAlreadyLoaded: [],
-        automaticLoaded: [],
-      } satisfies BatchNotification)
-    batchNotifications.set(batch.key, notification)
-    notification.manualLoaded =
-      preflightManualLoaded.length > 0
-        ? preflightManualLoaded.filter((name) =>
-            requestedManual.some((skill) => skill.name === name),
-          )
-        : (injection?.names ?? [])
-    notification.manualAlreadyLoaded = requestedManual
-      .filter(
-        (skill) =>
-          loadedSkills.has(skill.name) &&
-          !notification.manualLoaded.includes(skill.name),
-      )
-      .map((skill) => skill.name)
-    preflightManualLoaded = []
-    const messages = [...event.messages]
-    if (injection) {
-      const message = {
-        customType: INLINE_SKILL_MESSAGE_TYPE,
-        content: injection.content,
-        display: true,
-        details: {
-          names: injection.names,
-          skills: injection.skills,
-          source: "manual" as const,
-        },
+    if (skillsToInject.length > 0) {
+      try {
+        const inlineSkillContent = buildInlineSkillContent(
+          skillsToInject,
+          ctx.cwd,
+        )
+        pendingInlineSkillContent = inlineSkillContent.content
+        pendingInlineSkillBlocks = inlineSkillContent.skillBlocks
+        pendingInlineSkillNames = skillsToInject.map((skill) => skill.name)
+        for (const skill of skillsToInject) {
+          loadedSkills.add(skill.name)
+        }
+      } catch (error) {
+        pendingInlineSkillContent = undefined
+        pendingInlineSkillNames = []
+        pendingInlineSkillBlocks = []
+        ctx.ui.notify(
+          `inline-skills: failed to load skill: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        )
       }
-      // Persistence is delayed by Pi until turn end; retry still needs request-local content.
-      if (!manualPersistenceScheduled.has(batch.key)) {
-        manualPersistenceScheduled.add(batch.key)
-        pi.sendMessage(message, { triggerTurn: false })
-      }
-      messages.push({ ...message, role: "custom", timestamp: Date.now() })
-      for (const name of injection.names) loadedSkills.add(name)
     }
 
-    const conversation = buildConversationState(batch.history, texts, {
-      maxMessages: settings.jev.historyMessages,
-      maxChars: settings.jev.historyChars,
-    })
-    const currentInput = conversation.currentInput
-    if (
-      !automaticSelectionEnabled ||
-      !currentInput ||
-      settings.jev.maxSkills === 0 ||
-      completedBatches.has(batch.key)
-    ) {
-      notifyBatch(batch.key, ctx)
-      return { messages }
+    return {
+      action: "transform",
+      text: event.text,
+      ...(event.images ? { images: event.images } : {}),
     }
-    if (!decisions.has(batch.key)) {
-      const explicitNames = [
-        ...new Set(
-          texts.flatMap((text) =>
-            explicitSkills(text)
-              .map((skill) => skill.name)
-              .concat(nativeSkillNames(text)),
-          ),
-        ),
-      ]
-      const excluded = new Set(settings.jev.excludedSkills)
-      const candidates = getSkills(pi).filter(
-        (skill) =>
-          !loadedSkills.has(skill.name) &&
-          !explicitNames.includes(skill.name) &&
-          isAutomaticSkillCandidate(
-            { name: skill.name, path: skill.sourceInfo?.path },
-            excluded,
-          ),
-      )
-      decisions.set(
-        batch.key,
-        (async (): Promise<SkillInjection | undefined> => {
-          if (candidates.length === 0) return undefined
-          try {
-            const apiKey =
-              settings.jev.provider === "openrouter"
-                ? await ctx.modelRegistry.getApiKeyForProvider("openrouter")
-                : process.env["TYPESAFE_API_KEY"]
-            if (!valid()) return undefined
-            if (!apiKey) {
-              ctx.ui.notify(
-                `inline-skills: Jev selection skipped (${settings.jev.provider} credentials unavailable)`,
-                "warning",
-              )
-              return undefined
-            }
-            const selection = await selectSkills({
-              settings: settings.jev,
-              apiKey,
-              currentInput,
-              conversation: conversation.messages,
-              conversationTruncated: conversation.truncated,
-              candidates,
-              explicitSkills: explicitNames,
-              loadedSkills: [...loadedSkills],
-              ...(signal ? { signal } : {}),
-            })
-            if (!valid()) return undefined
-            const selected = selection.selected.flatMap((name) =>
-              candidates.filter((skill) => skill.name === name),
-            )
-            const currentLoaded = effectiveLoadedSkills(pi, ctx)
-            return buildSkillInjection(
-              selected.filter((skill) => !currentLoaded.has(skill.name)),
-              ctx.cwd,
-              (skill) => {
-                if (valid())
-                  ctx.ui.notify(
-                    `inline-skills: failed to load ${skill.name}`,
-                    "error",
-                  )
-              },
-            )
-          } catch (error) {
-            if (
-              valid() &&
-              (!(error instanceof JevSelectionError) ||
-                error.kind !== "aborted")
-            ) {
-              ctx.ui.notify(
-                `inline-skills: Jev selection skipped (${error instanceof JevSelectionError ? error.kind : "unknown"})`,
-                "warning",
-              )
-            }
-            return undefined
-          }
-        })(),
-      )
-    }
-    const decision = await decisions.get(batch.key)!
-    if (!valid()) return { messages }
-    if (!decision) {
-      notifyBatch(batch.key, ctx)
-      return { messages }
-    }
-    const currentLoaded = effectiveLoadedSkills(pi, ctx)
-    const remaining = decision.skills.filter(
-      (skill) => !currentLoaded.has(skill.name),
-    )
-    if (remaining.length === 0) {
-      notifyBatch(batch.key, ctx)
-      return { messages }
-    }
-    const automaticInjection = renderSkillInjection(remaining)
-    const message = {
-      customType: INLINE_SKILL_MESSAGE_TYPE,
-      content: automaticInjection.content,
-      display: false,
-      details: {
-        names: automaticInjection.names,
-        skills: automaticInjection.skills,
-        source: "jev" as const,
-      },
-    }
-    if (!valid()) return { messages }
-    if (!automaticPersistenceScheduled.has(batch.key)) {
-      automaticPersistenceScheduled.add(batch.key)
-      pi.sendMessage(message, { triggerTurn: false })
-      notification.automaticLoaded = automaticInjection.names
-    }
-    messages.push({ ...message, role: "custom", timestamp: Date.now() })
-    notifyBatch(batch.key, ctx)
-    return { messages }
   })
 
-  pi.on("before_agent_start", (event, ctx) => {
-    const loadedSkills = effectiveLoadedSkills(pi, ctx)
-    for (const name of nativeSkillNames(event.prompt)) loadedSkills.add(name)
-    const injection = manualInjection([event.prompt], ctx, loadedSkills)
-    if (!injection) return
-    preflightManualLoaded = injection.names
+  pi.on("before_agent_start", async () => {
+    if (!pendingInlineSkillContent) return
+    const content = pendingInlineSkillContent
+    const names = pendingInlineSkillNames
+    const skills = pendingInlineSkillBlocks
+    pendingInlineSkillContent = undefined
+    pendingInlineSkillNames = []
+    pendingInlineSkillBlocks = []
     return {
       message: {
         customType: INLINE_SKILL_MESSAGE_TYPE,
-        content: injection.content,
+        content,
         display: true,
-        details: {
-          names: injection.names,
-          skills: injection.skills,
-          source: "manual",
-        },
+        details: { names, skills },
       },
     }
   })
